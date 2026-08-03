@@ -14,17 +14,21 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Subtitle-source selector as a vertical, sectioned list: an "Embedded" section and an
- * "External / Provider" section (external subs and provider results together), plus a "loading
- * more…" row while a provider search is in flight. Pure UI — reports selection and focus-leave via
- * {@link Listener}; the controller owns the option list and its loading states.
+ * Subtitle-source selector: a vertical, sectioned list ("Embedded" and "External / Provider", the
+ * latter also holding provider results and a "loading more…" row), plus a <b>Done</b> button at the
+ * bottom. Picking a subtitle moves focus to Done (a second OK closes the panel); ◄ switches to the
+ * sync screen, Back opens the sidebar menu.
  */
 public class SubtitleSelectorView extends ScrollView {
 
     public interface Listener {
         void onSelect(String optionId);
-        /** User pressed left/back: hand focus back to the sidebar. */
-        void onLeaveLeft();
+        /** ◄ — switch to the other screen (sync). */
+        void onToggleScreen();
+        /** Back — open the sidebar menu. */
+        void onOpenMenu();
+        /** Done — close the panel. */
+        void onRequestClose();
     }
 
     private static final int TEAL = 0xFF4DD0E1;
@@ -34,14 +38,15 @@ public class SubtitleSelectorView extends ScrollView {
     private static final int HEADER = 0xFF7A8A93;
 
     private final LinearLayout column;
+    private TextView doneButton;
     private Listener listener;
 
-    private final List<SubtitleOption> ordered = new ArrayList<>(); // display order = embedded, then external/provider
+    private final List<SubtitleOption> ordered = new ArrayList<>();
     private final List<TextView> rowViews = new ArrayList<>();
     private String selectedId;
     private boolean loadingMore;
     private boolean focused;
-    private int focusIndex;
+    private int focusIndex; // 0..ordered.size()-1 = option rows; ordered.size() = Done
 
     public SubtitleSelectorView(Context c) {
         super(c);
@@ -64,7 +69,7 @@ public class SubtitleSelectorView extends ScrollView {
             for (SubtitleOption o : options) if (o.source == SubtitleOption.Source.EMBEDDED) ordered.add(o);
             for (SubtitleOption o : options) if (o.source != SubtitleOption.Source.EMBEDDED) ordered.add(o);
         }
-        if (focusIndex >= ordered.size()) focusIndex = Math.max(0, ordered.size() - 1);
+        if (focusIndex > ordered.size()) focusIndex = ordered.size();
         rebuild();
     }
 
@@ -85,19 +90,28 @@ public class SubtitleSelectorView extends ScrollView {
                 styleRows();
                 return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
-                focusIndex = Math.min(ordered.size() - 1, focusIndex + 1);
+                focusIndex = Math.min(ordered.size(), focusIndex + 1);
                 styleRows();
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
+                if (listener != null) listener.onToggleScreen();
+                return true;
             case KeyEvent.KEYCODE_BACK:
-                if (listener != null) listener.onLeaveLeft();
+                if (listener != null) listener.onOpenMenu();
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                if (listener != null && focusIndex >= 0 && focusIndex < ordered.size()) {
+                if (listener == null) return true;
+                if (focusIndex >= ordered.size()) {
+                    listener.onRequestClose();
+                } else {
                     SubtitleOption o = ordered.get(focusIndex);
-                    if (o.state != SubtitleOption.State.LOADING) listener.onSelect(o.id);
+                    if (o.state != SubtitleOption.State.LOADING) {
+                        listener.onSelect(o.id);
+                        focusIndex = ordered.size(); // jump to Done for an easy confirm
+                        styleRows();
+                    }
                 }
                 return true;
             default:
@@ -133,14 +147,23 @@ public class SubtitleSelectorView extends ScrollView {
             for (SubtitleOption o : ordered) {
                 if (o.source != SubtitleOption.Source.EMBEDDED) addRow(o);
             }
-            if (loadingMore) {
-                TextView loader = row("⟳ loading more…", DIM);
-                column.addView(loader); // not selectable, not added to rowViews
-            }
+            if (loadingMore) column.addView(row("⟳ loading more…", DIM));
         }
         if (ordered.isEmpty() && !loadingMore) {
             column.addView(row("No subtitles available", DIM));
         }
+
+        doneButton = new TextView(getContext());
+        doneButton.setText("Done");
+        doneButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        doneButton.setGravity(Gravity.CENTER);
+        doneButton.setPadding(dp(14), dp(12), dp(14), dp(12));
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        dlp.topMargin = dp(24);
+        doneButton.setLayoutParams(dlp);
+        column.addView(doneButton);
+
         styleRows();
     }
 
@@ -163,6 +186,11 @@ public class SubtitleSelectorView extends ScrollView {
                 tv.setBackgroundColor(isSel ? 0x334DD0E1 : Color.TRANSPARENT);
                 tv.setTextColor(o.state == SubtitleOption.State.ERROR ? ERROR : (isSel ? TEAL : WHITE));
             }
+        }
+        if (doneButton != null) {
+            boolean isFocus = focused && focusIndex >= ordered.size();
+            doneButton.setTextColor(isFocus ? 0xFF000000 : WHITE);
+            doneButton.setBackgroundColor(isFocus ? WHITE : 0x33FFFFFF);
         }
     }
 

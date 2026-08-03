@@ -104,11 +104,10 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
 
     public void open() {
         setVisibility(VISIBLE);
-        screen = Screen.SYNC;
-        focus = Focus.SIDEBAR;
+        screen = Screen.SELECT; // subtitle button always lands on the selection screen first
         syncView.reset();
         showScreen();
-        focusSidebar();
+        focusContent();
     }
 
     public void close() {
@@ -179,17 +178,21 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         styleSidebar();
     }
 
-    // --- SubtitleSelectorView.Listener ---
+    // --- SubtitleSelectorView.Listener + SyncView.Listener (shared) ---
 
     @Override public void onSelect(String optionId) {
         if (callbacks != null) callbacks.onSelectOption(optionId);
     }
 
-    @Override public void onLeaveLeft() {
-        focusSidebar();
+    @Override public void onToggleScreen() {
+        screen = (screen == Screen.SELECT) ? Screen.SYNC : Screen.SELECT;
+        showScreen();
+        focusContent();
     }
 
-    // --- SyncView.Listener ---
+    @Override public void onOpenMenu() {
+        focusSidebar();
+    }
 
     @Override public void onRequestClose() {
         close();
