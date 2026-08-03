@@ -93,6 +93,8 @@ import androidx.media3.ui.DefaultTimeBar;
 import androidx.media3.ui.PlayerControlView;
 import androidx.media3.ui.PlayerView;
 import androidx.media3.ui.SubtitleView;
+
+import com.brouken.player.subs.CustomSubtitleController;
 import androidx.media3.ui.TimeBar;
 
 import com.brouken.player.dtpv.DoubleTapPlayerView;
@@ -122,6 +124,7 @@ public class PlayerActivity extends Activity {
 
     public CustomPlayerView playerView;
     public static ExoPlayer player;
+    public CustomSubtitleController customSubtitles;
     private YouTubeOverlay youTubeOverlay;
 
     private Object mPictureInPictureParamsBuilder;
@@ -1180,6 +1183,7 @@ public class PlayerActivity extends Activity {
         haveMedia = mPrefs.mediaUri != null;
 
         if (player != null) {
+            if (customSubtitles != null) { customSubtitles.release(); customSubtitles = null; }
             player.removeListener(playerListener);
             player.clearMediaItems();
             player.release();
@@ -1316,6 +1320,11 @@ public class PlayerActivity extends Activity {
             }
             player.setMediaItem(mediaItemBuilder.build(), mPrefs.getPosition());
 
+            // Custom subtitle overlay: takes over external subtitles (parse + render + sync).
+            if (customSubtitles != null) customSubtitles.release();
+            customSubtitles = new CustomSubtitleController(this, playerView, player, trackSelector);
+            customSubtitles.onMediaSet(apiAccess && apiSubs.size() > 0 ? apiSubs : null, mPrefs.subtitleUri);
+
             try {
                 if (loudnessEnhancer != null) {
                     loudnessEnhancer.release();
@@ -1416,6 +1425,7 @@ public class PlayerActivity extends Activity {
             if (player.isPlaying() && restorePlayStateAllowed) {
                 restorePlayState = true;
             }
+            if (customSubtitles != null) { customSubtitles.release(); customSubtitles = null; }
             player.removeListener(playerListener);
             player.clearMediaItems();
             player.release();

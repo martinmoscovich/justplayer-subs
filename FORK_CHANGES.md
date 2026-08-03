@@ -10,6 +10,7 @@ reason, so rebases against `upstream` stay tractable.
 |---|---|---|
 | `settings.gradle` | Include `:subtitle-engine-java` by relative path (`../subtitle-engine-java`). | Depend on the pure-JVM subtitle engine, which lives as a sibling of the fork (`player/subtitle-engine-java`). |
 | `app/build.gradle` | Add `implementation(project(':subtitle-engine-java'))` excluding the desktop `com.microsoft.onnxruntime:onnxruntime`; add `implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'`. | Use the engine from the app; the engine pulls the desktop ONNX runtime for its CLI, which must not enter the APK — the app provides the Android ONNX build instead (SPEC §10). |
+| `app/src/main/java/com/brouken/player/PlayerActivity.java` | +1 import; +1 field `customSubtitles`; instantiate `CustomSubtitleController` after `setMediaItem` and call `onMediaSet(...)`; release it at both player-teardown points. ~6 added lines, no existing logic changed. | Hook the custom subtitle overlay (external-sub parse + render + sync) with the smallest possible footprint. All behaviour lives in `com.brouken.player.subs.CustomSubtitleController`. |
 
 ## Added files (not upstream)
 
