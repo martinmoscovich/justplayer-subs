@@ -1323,7 +1323,7 @@ public class PlayerActivity extends Activity {
             // Custom subtitle overlay: takes over external subtitles (parse + render + sync).
             if (customSubtitles != null) customSubtitles.release();
             customSubtitles = new CustomSubtitleController(this, playerView, player, trackSelector);
-            customSubtitles.onMediaSet(apiAccess && apiSubs.size() > 0 ? apiSubs : null, mPrefs.subtitleUri);
+            customSubtitles.onMediaSet(mPrefs.mediaUri, apiAccess && apiSubs.size() > 0 ? apiSubs : null, mPrefs.subtitleUri);
 
             try {
                 if (loudnessEnhancer != null) {

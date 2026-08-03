@@ -76,17 +76,24 @@ public class CustomSubtitleController {
     }
 
     /**
-     * Called once the media and its subtitles are known. If an external subtitle is present, take
-     * it over: parse it with the engine, render it here, and disable Media3's text track. If there
-     * is no external subtitle, stay inactive and let Media3 handle embedded tracks as before.
+     * Called once the media and its subtitles are known. Priority for the external subtitle we
+     * take over:
+     * <ol>
+     *   <li>a subtitle passed via intent (the Nuvio path: {@code subs} / {@code subtitle_uri}),</li>
+     *   <li>otherwise, for local media, a sidecar {@code <video>.srt} next to the file.</li>
+     * </ol>
+     * If none is found we stay inactive and Media3 renders embedded tracks as before.
      */
-    public void onMediaSet(@Nullable List<MediaItem.SubtitleConfiguration> apiSubs,
+    public void onMediaSet(@Nullable Uri mediaUri,
+                           @Nullable List<MediaItem.SubtitleConfiguration> apiSubs,
                            @Nullable Uri prefsSubtitleUri) {
         Uri external = firstExternalUri(apiSubs, prefsSubtitleUri);
         if (external == null) {
-            return; // embedded-only: Media3 renders, we stay out of the way
+            external = sidecarCandidate(mediaUri);
         }
-        parseAsync(external);
+        if (external != null) {
+            parseAsync(external); // parseAsync fails gracefully (stays inactive) if unreadable
+        }
     }
 
     /** Replaces the current sync state and refreshes the shown cue immediately. */
@@ -118,24 +125,41 @@ public class CustomSubtitleController {
         return prefsSubtitleUri;
     }
 
+    /**
+     * Builds a {@code <video>.srt} sidecar URI next to {@code mediaUri} by swapping the extension.
+     * Returns {@code null} when the URI has no extension. The candidate may not exist; the caller's
+     * read attempt handles that. (Non-file URIs — e.g. MediaStore {@code content://} — produce a
+     * bogus candidate that simply fails to open, which is fine.)
+     */
+    @Nullable
+    private static Uri sidecarCandidate(@Nullable Uri mediaUri) {
+        if (mediaUri == null) return null;
+        String s = mediaUri.toString();
+        int dot = s.lastIndexOf('.');
+        int slash = s.lastIndexOf('/');
+        if (dot <= slash) return null; // no extension in the last path segment
+        return Uri.parse(s.substring(0, dot) + ".srt");
+    }
+
     private void parseAsync(Uri uri) {
         new Thread(() -> {
             try {
                 String content = readText(context, uri);
                 SubtitleFile file = SubtitleConverter.convert(content, "srt", null);
-                handler.post(() -> onParsed(file));
+                handler.post(() -> onParsed(file, uri));
             } catch (Exception e) {
-                android.util.Log.w(TAG, "failed to load external subtitle: " + e.getMessage());
+                android.util.Log.w(TAG, "no external subtitle loaded from " + uri + ": " + e.getMessage());
             }
         }, "custom-sub-parse").start();
     }
 
-    private void onParsed(SubtitleFile file) {
+    private void onParsed(SubtitleFile file, Uri uri) {
         this.subtitleFile = file;
         this.active = true;
         disableMedia3TextTrack();
         overlay.setVisibility(TextView.VISIBLE);
         scheduleTick();
+        android.util.Log.i(TAG, "external subtitle active: " + file.getEntries().size() + " cues from " + uri);
     }
 
     private void disableMedia3TextTrack() {
@@ -181,14 +205,30 @@ public class CustomSubtitleController {
     }
 
     private static String readText(Context ctx, Uri uri) throws Exception {
+        String scheme = uri.getScheme();
+        if ("http".equals(scheme) || "https".equals(scheme)) {
+            java.net.HttpURLConnection conn =
+                    (java.net.HttpURLConnection) new java.net.URL(uri.toString()).openConnection();
+            conn.setConnectTimeout(10_000);
+            conn.setReadTimeout(10_000);
+            try (InputStream in = conn.getInputStream()) {
+                return readAll(in);
+            } finally {
+                conn.disconnect();
+            }
+        }
         try (InputStream in = ctx.getContentResolver().openInputStream(uri)) {
             if (in == null) throw new IllegalStateException("cannot open " + uri);
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-            return out.toString(StandardCharsets.UTF_8.name());
+            return readAll(in);
         }
+    }
+
+    private static String readAll(InputStream in) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+        return out.toString(StandardCharsets.UTF_8.name());
     }
 
     private int dp(int v) {
