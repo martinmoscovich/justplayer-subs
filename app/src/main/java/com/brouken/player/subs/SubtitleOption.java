@@ -8,11 +8,10 @@ import androidx.annotation.Nullable;
  * One selectable subtitle in the sync panel's selector. Sources:
  * <ul>
  *   <li>{@link Source#EXTERNAL} — passed via intent (Nuvio) or a sidecar; rendered by our overlay
- *       and eligible for sync.</li>
+ *       and eligible for sync. Loading its content is async (URLs can be slow).</li>
  *   <li>{@link Source#EMBEDDED} — a text track inside the media; rendered by Media3, assumed in-sync.</li>
- *   <li>{@link Source#PROVIDER} — fetched from a service (OpenSubtitles, …); starts {@link State#LOADING}
- *       and resolves to {@link State#READY} or {@link State#ERROR}. (Provider fetching is future work;
- *       the state machine is here so the UI already handles it.)</li>
+ *   <li>{@link Source#PROVIDER} — a result from a service (OpenSubtitles, …). The list itself is
+ *       fetched asynchronously; downloading a chosen result is async too ({@link State#LOADING}).</li>
  * </ul>
  */
 public class SubtitleOption {
@@ -27,13 +26,16 @@ public class SubtitleOption {
     public final Source source;
     public State state;
 
-    /** EXTERNAL/PROVIDER: the subtitle URI once ready (nullable while loading). */
+    /** EXTERNAL: the subtitle URI. */
     @Nullable public final Uri uri;
     /** EMBEDDED: index among the media's text track groups; -1 otherwise. */
     public final int embeddedTextIndex;
+    /** PROVIDER: opaque id used to download the result (e.g. OpenSubtitles file id). */
+    @Nullable public final String providerRef;
 
     private SubtitleOption(String id, String label, @Nullable String language, Source source,
-                           State state, @Nullable Uri uri, int embeddedTextIndex) {
+                           State state, @Nullable Uri uri, int embeddedTextIndex,
+                           @Nullable String providerRef) {
         this.id = id;
         this.label = label;
         this.language = language;
@@ -41,18 +43,19 @@ public class SubtitleOption {
         this.state = state;
         this.uri = uri;
         this.embeddedTextIndex = embeddedTextIndex;
+        this.providerRef = providerRef;
     }
 
     public static SubtitleOption external(String id, String label, @Nullable String language, Uri uri) {
-        return new SubtitleOption(id, label, language, Source.EXTERNAL, State.READY, uri, -1);
+        return new SubtitleOption(id, label, language, Source.EXTERNAL, State.READY, uri, -1, null);
     }
 
     public static SubtitleOption embedded(String id, String label, @Nullable String language, int textIndex) {
-        return new SubtitleOption(id, label, language, Source.EMBEDDED, State.READY, null, textIndex);
+        return new SubtitleOption(id, label, language, Source.EMBEDDED, State.READY, null, textIndex, null);
     }
 
-    public static SubtitleOption provider(String id, String label, @Nullable String language, State state) {
-        return new SubtitleOption(id, label, language, Source.PROVIDER, state, null, -1);
+    public static SubtitleOption provider(String id, String label, @Nullable String language, String providerRef) {
+        return new SubtitleOption(id, label, language, Source.PROVIDER, State.READY, null, -1, providerRef);
     }
 
     public boolean isReady() {

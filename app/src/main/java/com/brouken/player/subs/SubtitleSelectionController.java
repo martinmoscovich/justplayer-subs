@@ -1,14 +1,17 @@
 package com.brouken.player.subs;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Handler;
+import android.text.TextUtils;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.Player;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.Tracks;
@@ -19,10 +22,20 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
+import okhttp3.OkHttpClient;
+import subtitleengine.core.model.ContentMetadata;
+import subtitleengine.core.model.SubtitleError;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.parser.SubtitleConverter;
+import subtitleengine.provider.DownloadedSubtitle;
+import subtitleengine.provider.OpenSubtitlesProvider;
+import subtitleengine.provider.SubtitleProvider;
+import subtitleengine.provider.SubtitleSearchResult;
 
 /**
  * The selection concern: builds and owns the list of selectable subtitles (external via intent or a
@@ -50,10 +63,17 @@ public class SubtitleSelectionController {
     private final Listener listener;
     private final Handler mainHandler;
 
+    /** Dedicated prefs file (not Just Player's) holding subtitle settings; secret never hardcoded. */
+    private static final String PREFS_FILE = "subtitle_prefs";
+    private static final String PREF_OPENSUBTITLES_KEY = "opensubtitles_api_key";
+    private static final int MAX_PROVIDER_RESULTS = 12;
+
     private final List<SubtitleOption> externalOptions = new ArrayList<>();
     private final List<SubtitleOption> embeddedOptions = new ArrayList<>();
+    private final List<SubtitleOption> providerOptions = new ArrayList<>();
     @Nullable private String selectedId;
-    private boolean loadingMore = false; // reserved: true while a provider search is in flight
+    private boolean loadingMore = false; // true while a provider search is in flight
+    private boolean providerSearched = false;
     @Nullable private Player.Listener tracksListener;
 
     public SubtitleSelectionController(Context context, ExoPlayer player,
@@ -88,10 +108,12 @@ public class SubtitleSelectionController {
         } else {
             refresh(); // embedded-only: Media3 renders its default; user can still pick in the panel
         }
+        maybeSearchProvider();
     }
 
     public boolean hasOptions() {
-        return !externalOptions.isEmpty() || !embeddedOptions.isEmpty();
+        return !externalOptions.isEmpty() || !embeddedOptions.isEmpty()
+                || !providerOptions.isEmpty() || loadingMore;
     }
 
     public void release() {
@@ -107,6 +129,8 @@ public class SubtitleSelectionController {
         selectedId = id;
         if (opt.source == SubtitleOption.Source.EMBEDDED) {
             selectEmbedded(opt);
+        } else if (opt.source == SubtitleOption.Source.PROVIDER) {
+            loadProvider(opt);
         } else {
             loadExternal(opt);
         }
@@ -115,8 +139,9 @@ public class SubtitleSelectionController {
     // --- option list ---
 
     private List<SubtitleOption> allOptions() {
-        List<SubtitleOption> all = new ArrayList<>(externalOptions.size() + embeddedOptions.size());
+        List<SubtitleOption> all = new ArrayList<>();
         all.addAll(externalOptions);
+        all.addAll(providerOptions);
         all.addAll(embeddedOptions);
         return all;
     }
@@ -128,6 +153,7 @@ public class SubtitleSelectionController {
     @Nullable
     private SubtitleOption findOption(String id) {
         for (SubtitleOption o : externalOptions) if (o.id.equals(id)) return o;
+        for (SubtitleOption o : providerOptions) if (o.id.equals(id)) return o;
         for (SubtitleOption o : embeddedOptions) if (o.id.equals(id)) return o;
         return null;
     }
@@ -203,7 +229,88 @@ public class SubtitleSelectionController {
     private void onExternalError(SubtitleOption opt, Exception e) {
         opt.state = SubtitleOption.State.ERROR;
         refresh();
-        android.util.Log.w(TAG, "failed to load subtitle from " + opt.uri + ": " + e.getMessage());
+        android.util.Log.w(TAG, "failed to load subtitle '" + opt.label + "': " + e.getMessage());
+    }
+
+    // --- provider (OpenSubtitles) ---
+
+    private void maybeSearchProvider() {
+        if (providerSearched) return;
+        String apiKey = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                .getString(PREF_OPENSUBTITLES_KEY, null);
+        if (TextUtils.isEmpty(apiKey)) return; // no key configured → no provider search
+        String title = mediaTitle();
+        if (TextUtils.isEmpty(title)) return;
+        providerSearched = true;
+
+        List<String> langs = searchLanguages();
+        loadingMore = true;
+        refresh();
+
+        new Thread(() -> {
+            SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
+            ContentMetadata meta = new ContentMetadata(title, null, null, null, null, null, null, title);
+            try {
+                List<SubtitleSearchResult> results = provider.search(meta, langs, null);
+                mainHandler.post(() -> onProviderResults(results));
+            } catch (Exception e) {
+                mainHandler.post(() -> onProviderError(e));
+            }
+        }, "opensubtitles-search").start();
+    }
+
+    private void onProviderResults(List<SubtitleSearchResult> results) {
+        providerOptions.clear();
+        int n = 0;
+        for (SubtitleSearchResult r : results) {
+            if (n++ >= MAX_PROVIDER_RESULTS) break;
+            String lang = r.getLanguage() != null ? r.getLanguage().toUpperCase(Locale.ROOT) : "?";
+            String label = lang + " · OpenSubtitles ★" + String.format(Locale.ROOT, "%.1f", r.getRating());
+            providerOptions.add(SubtitleOption.provider("prov" + r.getId(), label, r.getLanguage(), r.getId()));
+        }
+        loadingMore = false;
+        refresh();
+        android.util.Log.i(TAG, "OpenSubtitles: " + providerOptions.size() + " results");
+    }
+
+    private void onProviderError(Exception e) {
+        loadingMore = false;
+        refresh();
+        android.util.Log.w(TAG, "OpenSubtitles search failed: " + e.getMessage());
+    }
+
+    private void loadProvider(SubtitleOption opt) {
+        if (opt.providerRef == null) return;
+        opt.state = SubtitleOption.State.LOADING;
+        refresh();
+        String apiKey = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+                .getString(PREF_OPENSUBTITLES_KEY, "");
+        new Thread(() -> {
+            SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
+            try {
+                DownloadedSubtitle dl = provider.download(opt.providerRef);
+                SubtitleFile file = SubtitleConverter.convert(dl.getContent(), "srt", opt.language);
+                mainHandler.post(() -> onExternalLoaded(opt, file));
+            } catch (Exception e) {
+                mainHandler.post(() -> onExternalError(opt, e));
+            }
+        }, "opensubtitles-download").start();
+    }
+
+    @Nullable
+    private String mediaTitle() {
+        if (player == null) return null;
+        MediaMetadata md = player.getMediaMetadata();
+        CharSequence t = md != null ? (md.title != null ? md.title : md.displayTitle) : null;
+        return t != null ? t.toString() : null;
+    }
+
+    private List<String> searchLanguages() {
+        Set<String> langs = new LinkedHashSet<>();
+        String dev = Locale.getDefault().getLanguage();
+        if (!TextUtils.isEmpty(dev)) langs.add(dev);
+        langs.add("en");
+        return new ArrayList<>(langs);
     }
 
     // --- embedded (hand back to Media3) ---
