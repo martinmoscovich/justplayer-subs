@@ -151,17 +151,23 @@ public class SubtitleSelectionController {
     }
 
     private void rebuildEmbeddedOptions(@Nullable Tracks tracks) {
-        embeddedOptions.clear();
-        if (tracks == null) return;
-        int ti = 0;
-        for (Tracks.Group g : tracks.getGroups()) {
-            if (g.getType() != C.TRACK_TYPE_TEXT) continue;
-            Format f = g.getTrackFormat(0);
-            String lang = f.language;
-            String labelText = f.label != null ? f.label : (lang != null ? lang : "Embedded " + (ti + 1));
-            embeddedOptions.add(SubtitleOption.embedded("emb" + ti, labelText + " (embedded)", lang, ti));
-            ti++;
+        List<SubtitleOption> found = new ArrayList<>();
+        if (tracks != null) {
+            int ti = 0;
+            for (Tracks.Group g : tracks.getGroups()) {
+                if (g.getType() != C.TRACK_TYPE_TEXT) continue;
+                Format f = g.getTrackFormat(0);
+                String lang = f.language;
+                String labelText = f.label != null ? f.label : (lang != null ? lang : "Embedded " + (ti + 1));
+                found.add(SubtitleOption.embedded("emb" + ti, labelText + " (embedded)", lang, ti));
+                ti++;
+            }
         }
+        // Disabling the text track (when we take over for an external sub) fires onTracksChanged with
+        // no text groups; keep the embedded options we already discovered rather than dropping them.
+        if (found.isEmpty() && !embeddedOptions.isEmpty()) return;
+        embeddedOptions.clear();
+        embeddedOptions.addAll(found);
     }
 
     // --- external ---

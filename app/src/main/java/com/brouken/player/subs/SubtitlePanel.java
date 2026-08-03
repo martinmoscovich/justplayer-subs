@@ -1,9 +1,14 @@
 package com.brouken.player.subs;
 
 import android.content.Context;
+import android.graphics.Color;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import java.util.List;
 
@@ -11,14 +16,16 @@ import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.sync.SyncState;
 
 /**
- * Container that puts the two distinct subtitle concerns on one screen and manages focus between
- * them: the {@link SubtitleSelectorView} (choose the source) on top, and the {@link SyncView}
- * (manual sync) below. It owns no domain logic — it forwards selection/sync events to
- * {@link Callbacks} (the controller) and moves focus up/down between the two child views.
+ * Container for the two subtitle screens, switched via a left sidebar:
+ * <ul>
+ *   <li><b>Subtitles</b> — {@link SubtitleSelectorView} (choose the source).</li>
+ *   <li><b>Sync</b> — {@link SyncView} (manual sync of the chosen subtitle).</li>
+ * </ul>
+ * Focus is either on the sidebar (up/down switch screen, right/OK enter) or on the active screen
+ * (left/back return to the sidebar). No domain logic — events go to {@link Callbacks}.
  */
 public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.Listener, SyncView.Listener {
 
-    /** Everything the controller supplies: sync ops, player ops, and subtitle selection. */
     public interface Callbacks {
         long currentPositionMs();
         boolean isPlaying();
@@ -31,28 +38,52 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         void onSelectOption(String optionId);
     }
 
+    private enum Screen { SELECT, SYNC }
+    private enum Focus { SIDEBAR, CONTENT }
+
+    private final LinearLayout sidebar;
+    private final TextView[] sidebarItems;
     private final SubtitleSelectorView selector;
     private final SyncView syncView;
+
     private Callbacks callbacks;
-    private boolean focusOnSelector = false;
+    private Screen screen = Screen.SYNC;
+    private Focus focus = Focus.SIDEBAR;
 
     public SubtitlePanel(Context context) {
         super(context);
-        setBackgroundColor(0xB3000000); // ~70% black, video visible behind
+        setBackgroundColor(0xB3000000);
         setVisibility(GONE);
         setClickable(true);
 
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        addView(row, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        sidebar = new LinearLayout(context);
+        sidebar.setOrientation(LinearLayout.VERTICAL);
+        sidebar.setBackgroundColor(0x22FFFFFF);
+        sidebar.setPadding(dp(8), dp(24), dp(8), dp(24));
+        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(dp(180), ViewGroup.LayoutParams.MATCH_PARENT);
+        row.addView(sidebar, sbLp);
+
+        sidebarItems = new TextView[]{ sidebarItem("Subtitles"), sidebarItem("Sync") };
+        for (TextView it : sidebarItems) sidebar.addView(it);
+
+        FrameLayout content = new FrameLayout(context);
+        LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+        row.addView(content, cLp);
+
         selector = new SubtitleSelectorView(context);
         selector.setListener(this);
-        addView(selector, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        content.addView(selector, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         syncView = new SyncView(context);
         syncView.setListener(this);
-        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        slp.topMargin = dp(52); // below the selector row
-        addView(syncView, slp);
+        content.addView(syncView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
     public void setCallbacks(Callbacks cb) {
@@ -72,11 +103,12 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
     }
 
     public void open() {
-        focusOnSelector = false;
         setVisibility(VISIBLE);
+        screen = Screen.SYNC;
+        focus = Focus.SIDEBAR;
         syncView.reset();
-        syncView.setFocused(true);
-        selector.setFocused(false);
+        showScreen();
+        focusSidebar();
     }
 
     public void close() {
@@ -87,45 +119,79 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         if (isOpen()) syncView.onTick(positionMs);
     }
 
-    /** Routes a key to the focused child. Returns true if consumed. */
     public boolean handleKey(KeyEvent event) {
         if (event.getAction() != KeyEvent.ACTION_DOWN) {
             return isNavKey(event.getKeyCode());
         }
         int keyCode = event.getKeyCode();
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            close();
-            return true;
+        if (focus == Focus.SIDEBAR) return handleSidebarKey(keyCode);
+        return screen == Screen.SELECT ? selector.handleKey(keyCode) : syncView.handleKey(keyCode);
+    }
+
+    private boolean handleSidebarKey(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                screen = Screen.SELECT;
+                showScreen();
+                styleSidebar();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                screen = Screen.SYNC;
+                showScreen();
+                styleSidebar();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                focusContent();
+                return true;
+            case KeyEvent.KEYCODE_BACK:
+                close();
+                return true;
+            default:
+                return false;
         }
-        return focusOnSelector ? selector.handleKey(keyCode) : syncView.handleKey(keyCode);
+    }
+
+    private void showScreen() {
+        selector.setVisibility(screen == Screen.SELECT ? VISIBLE : GONE);
+        syncView.setVisibility(screen == Screen.SYNC ? VISIBLE : GONE);
+    }
+
+    private void focusSidebar() {
+        focus = Focus.SIDEBAR;
+        selector.setFocused(false);
+        syncView.setFocused(false);
+        styleSidebar();
+    }
+
+    private void focusContent() {
+        focus = Focus.CONTENT;
+        if (screen == Screen.SELECT) {
+            if (selector.isEmpty()) { focusSidebar(); return; }
+            selector.setFocused(true);
+            syncView.setFocused(false);
+        } else {
+            syncView.setFocused(true);
+            selector.setFocused(false);
+        }
+        styleSidebar();
     }
 
     // --- SubtitleSelectorView.Listener ---
 
-    @Override
-    public void onSelect(String optionId) {
+    @Override public void onSelect(String optionId) {
         if (callbacks != null) callbacks.onSelectOption(optionId);
     }
 
-    @Override
-    public void onFocusLeaveDown() {
-        focusOnSelector = false;
-        selector.setFocused(false);
-        syncView.setFocused(true);
+    @Override public void onLeaveLeft() {
+        focusSidebar();
     }
 
     // --- SyncView.Listener ---
 
-    @Override
-    public void onFocusLeaveUp() {
-        if (selector.isEmpty()) return;
-        focusOnSelector = true;
-        selector.setFocused(true);
-        syncView.setFocused(false);
-    }
-
-    @Override
-    public void onRequestClose() {
+    @Override public void onRequestClose() {
         close();
     }
 
@@ -137,6 +203,39 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
     @Override public void onSeek(long d) { if (callbacks != null) callbacks.onSeek(d); }
     @Override public void onSeekTo(long p) { if (callbacks != null) callbacks.onSeekTo(p); }
     @Override public void onTogglePlay() { if (callbacks != null) callbacks.onTogglePlay(); }
+
+    // --- sidebar rendering ---
+
+    private void styleSidebar() {
+        int active = screen == Screen.SELECT ? 0 : 1;
+        for (int i = 0; i < sidebarItems.length; i++) {
+            TextView it = sidebarItems[i];
+            boolean focused = focus == Focus.SIDEBAR && i == active;
+            if (focused) {
+                it.setTextColor(0xFF000000);
+                it.setBackgroundColor(0xFFFFFFFF);
+            } else if (i == active) {
+                it.setTextColor(0xFF4DD0E1);
+                it.setBackgroundColor(0x334DD0E1);
+            } else {
+                it.setTextColor(0xFFB0BEC5);
+                it.setBackgroundColor(Color.TRANSPARENT);
+            }
+        }
+    }
+
+    private TextView sidebarItem(String text) {
+        TextView tv = new TextView(getContext());
+        tv.setText(text);
+        tv.setTextColor(0xFFB0BEC5);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        tv.setPadding(dp(16), dp(14), dp(16), dp(14));
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.bottomMargin = dp(4);
+        tv.setLayoutParams(p);
+        return tv;
+    }
 
     private static boolean isNavKey(int keyCode) {
         switch (keyCode) {

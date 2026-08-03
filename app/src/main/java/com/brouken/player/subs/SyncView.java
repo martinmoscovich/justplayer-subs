@@ -46,9 +46,9 @@ public class SyncView extends FrameLayout {
         void onSeek(long deltaMs);
         void onSeekTo(long positionMs);
         void onTogglePlay();
-        /** User pressed up in the control row: hand focus to the selector above. */
-        void onFocusLeaveUp();
-        /** Done / Back: close the whole panel. */
+        /** User pressed left/back past the controls: hand focus to the sidebar. */
+        void onLeaveLeft();
+        /** Done button: close the whole panel. */
         void onRequestClose();
     }
 
@@ -81,6 +81,7 @@ public class SyncView extends FrameLayout {
 
     private final TextView readout;
     private final TextView hint;
+    private final TextView emptyMessage;
     private final VerticalGridView list;
     private final LinearLayout buttonRow;
     private final CueAdapter adapter = new CueAdapter();
@@ -120,6 +121,16 @@ public class SyncView extends FrameLayout {
         llp.topMargin = dp(28);
         llp.bottomMargin = dp(104);
         addView(list, llp);
+
+        emptyMessage = label(17, 0xFFB0BEC5);
+        emptyMessage.setGravity(Gravity.CENTER);
+        emptyMessage.setPadding(dp(40), 0, dp(40), 0);
+        emptyMessage.setText("This subtitle can't be synced\n(embedded — assumed in sync)");
+        emptyMessage.setVisibility(GONE);
+        FrameLayout.LayoutParams emp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        emp.gravity = Gravity.CENTER;
+        addView(emptyMessage, emp);
 
         hint = label(13, 0xFF90A4AE);
         hint.setPadding(dp(24), dp(6), dp(24), dp(4));
@@ -163,6 +174,10 @@ public class SyncView extends FrameLayout {
     public void bind(SubtitleFile file) {
         cues = (file != null && file.getEntries() != null) ? file.getEntries() : Collections.emptyList();
         adapter.notifyDataSetChanged();
+        boolean empty = cues.isEmpty();
+        emptyMessage.setVisibility(empty ? VISIBLE : GONE);
+        list.setVisibility(empty ? GONE : VISIBLE);
+        updateButtons();
     }
 
     /** Reset to the default zone; called when the panel opens. */
@@ -203,25 +218,28 @@ public class SyncView extends FrameLayout {
     private boolean handleControlsKey(int keyCode) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                buttonIndex = nextEnabled(buttonIndex, -1);
-                updateButtons();
+                int left = nextEnabled(buttonIndex, -1);
+                if (left == buttonIndex) {
+                    if (listener != null) listener.onLeaveLeft(); // already leftmost → sidebar
+                } else {
+                    buttonIndex = left;
+                    updateButtons();
+                }
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
                 buttonIndex = nextEnabled(buttonIndex, 1);
                 updateButtons();
                 return true;
             case KeyEvent.KEYCODE_DPAD_UP:
-                if (listener != null) listener.onFocusLeaveUp();
-                return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
-                return true;
+                return true; // swallow
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
                 if (enabled[buttonIndex]) buttons[buttonIndex].action.run();
                 return true;
             case KeyEvent.KEYCODE_BACK:
-                requestClose();
+                if (listener != null) listener.onLeaveLeft();
                 return true;
             default:
                 return false;
@@ -423,7 +441,7 @@ public class SyncView extends FrameLayout {
     private void updateHint() {
         hint.setText(zone == Zone.LIST
                 ? "▲ ▼ choose line   ·   ◄ ► nudge ±50ms   ·   OK: anchor here   ·   Back: cancel"
-                : "▲ subtitle   ·   ◄ ► move   ·   OK: select   ·   'Sync line' to anchor");
+                : "◄ ► move   ·   OK: select   ·   'Sync line' to anchor   ·   ◄ menu");
     }
 
     private void updateReadout() {
