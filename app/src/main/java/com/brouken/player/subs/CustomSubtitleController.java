@@ -127,6 +127,21 @@ public class CustomSubtitleController implements SyncPanel.Callbacks {
         render();
     }
 
+    @Override
+    public void onSeek(long deltaMs) {
+        if (player == null) return;
+        long target = player.getCurrentPosition() + deltaMs;
+        long duration = player.getDuration();
+        if (target < 0) target = 0;
+        if (duration > 0 && target > duration) target = duration;
+        player.seekTo(target);
+    }
+
+    /** Opens the manual-sync panel if an external subtitle is active. Wired to the subtitle button. */
+    public void openPanel() {
+        if (active) syncPanel.open();
+    }
+
     /**
      * Called once the media and its subtitles are known. Priority for the external subtitle we
      * take over:
@@ -247,6 +262,12 @@ public class CustomSubtitleController implements SyncPanel.Callbacks {
             overlay.setText("");
             return;
         }
+        if (syncPanel.isOpen()) {
+            // The panel shows the lines itself; hide the bottom overlay to avoid duplication.
+            if (overlay.getVisibility() != TextView.GONE) overlay.setVisibility(TextView.GONE);
+            return;
+        }
+        if (overlay.getVisibility() != TextView.VISIBLE) overlay.setVisibility(TextView.VISIBLE);
         long pos = player.getCurrentPosition();
         String text = activeCueText(pos);
         if (!text.contentEquals(overlay.getText())) {

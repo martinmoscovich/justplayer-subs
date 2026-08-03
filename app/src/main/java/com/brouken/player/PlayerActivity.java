@@ -614,6 +614,11 @@ public class PlayerActivity extends Activity {
             return true;
         });
 
+        // Subtitle button opens our manual-sync panel when a custom (external) subtitle is active.
+        exoSubtitle.setOnClickListener(v -> {
+            if (customSubtitles != null) customSubtitles.openPanel();
+        });
+
         updateButtons(false);
 
         final HorizontalScrollView horizontalScrollView = (HorizontalScrollView) getLayoutInflater().inflate(R.layout.controls, null);
