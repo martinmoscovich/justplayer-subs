@@ -7,6 +7,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.TextView;
@@ -25,6 +26,8 @@ import java.util.List;
 import subtitleengine.core.model.SubtitleEntry;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.parser.SubtitleConverter;
+import subtitleengine.sync.AnchorSource;
+import subtitleengine.sync.SyncAnchor;
 import subtitleengine.sync.SyncResolver;
 import subtitleengine.sync.SyncState;
 
@@ -40,15 +43,18 @@ import subtitleengine.sync.SyncState;
  * <p>Slice 1 (Fase 3): parse + render + offset. The sync UI (anchors, nudge, D-pad) builds on top
  * of the {@link SyncState} exposed here.
  */
-public class CustomSubtitleController {
+public class CustomSubtitleController implements SyncPanel.Callbacks {
 
     private static final String TAG = "CustomSubtitleController";
     private static final long POLL_MS = 100;
+    /** Key that opens the manual-sync panel (CC/subtitles remote key). */
+    private static final int KEY_OPEN_PANEL = KeyEvent.KEYCODE_CAPTIONS;
 
     private final Context context;
     private final ExoPlayer player;
     private final DefaultTrackSelector trackSelector;
     private final TextView overlay;
+    private final SyncPanel syncPanel;
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     @Nullable private SubtitleFile subtitleFile;
@@ -73,6 +79,52 @@ public class CustomSubtitleController {
         lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
         lp.bottomMargin = dp(48);
         root.addView(overlay, lp);
+
+        syncPanel = new SyncPanel(context);
+        syncPanel.setCallbacks(this);
+        root.addView(syncPanel, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    /**
+     * Routes a key event. Opens the sync panel on the CC key (when a subtitle is active), or hands
+     * the key to the panel while it is open. Returns true if consumed. Called from
+     * {@code PlayerActivity.dispatchKeyEvent}.
+     */
+    public boolean dispatchKey(KeyEvent event) {
+        if (syncPanel.isOpen()) {
+            return syncPanel.handleKey(event);
+        }
+        if (active && event.getAction() == KeyEvent.ACTION_DOWN && event.getKeyCode() == KEY_OPEN_PANEL) {
+            syncPanel.open();
+            return true;
+        }
+        return false;
+    }
+
+    // --- SyncPanel.Callbacks ---
+
+    @Override
+    public long currentPositionMs() {
+        return player != null ? player.getCurrentPosition() : 0L;
+    }
+
+    @Override
+    public SyncState state() {
+        return syncState;
+    }
+
+    @Override
+    public void onAnchor(int cueIndex, long cueStartMs, long videoPositionMs) {
+        syncState = syncState.withAnchorAdded(
+                new SyncAnchor(cueIndex, cueStartMs, videoPositionMs, AnchorSource.MANUAL));
+        render();
+    }
+
+    @Override
+    public void onNudge(long deltaMs) {
+        syncState = syncState.withNudgeShiftedBy(deltaMs);
+        render();
     }
 
     /**
@@ -112,6 +164,9 @@ public class CustomSubtitleController {
         if (overlay.getParent() instanceof ViewGroup) {
             ((ViewGroup) overlay.getParent()).removeView(overlay);
         }
+        if (syncPanel.getParent() instanceof ViewGroup) {
+            ((ViewGroup) syncPanel.getParent()).removeView(syncPanel);
+        }
     }
 
     // --- internals ---
@@ -130,6 +185,12 @@ public class CustomSubtitleController {
      * Returns {@code null} when the URI has no extension. The candidate may not exist; the caller's
      * read attempt handles that. (Non-file URIs — e.g. MediaStore {@code content://} — produce a
      * bogus candidate that simply fails to open, which is fine.)
+     *
+     * <p><b>NOTE — testing hook, not the Nuvio flow.</b> In production the external subtitle always
+     * arrives via the intent ({@code subs} / {@code subtitle_uri}). This sidecar fallback exists so
+     * we can inject a subtitle on the emulator (adb cannot pass the {@code Uri[]} intent extra).
+     * It doubles as a real convenience for local/HTTP media with a sidecar (like upstream's
+     * {@code SubtitleFinder}). Revisit in Fase 2 once we validate the real intent contract.
      */
     @Nullable
     private static Uri sidecarCandidate(@Nullable Uri mediaUri) {
@@ -156,6 +217,7 @@ public class CustomSubtitleController {
     private void onParsed(SubtitleFile file, Uri uri) {
         this.subtitleFile = file;
         this.active = true;
+        syncPanel.bind(file);
         disableMedia3TextTrack();
         overlay.setVisibility(TextView.VISIBLE);
         scheduleTick();
@@ -176,6 +238,7 @@ public class CustomSubtitleController {
     private void tick() {
         if (!active) return;
         render();
+        if (syncPanel.isOpen()) syncPanel.onTick(currentPositionMs());
         scheduleTick();
     }
 

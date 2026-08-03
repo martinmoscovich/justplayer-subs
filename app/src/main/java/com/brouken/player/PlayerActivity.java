@@ -955,6 +955,8 @@ public class PlayerActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        // Route keys to the custom subtitle sync panel first (opens it, or handles nav while open).
+        if (customSubtitles != null && customSubtitles.dispatchKey(event)) return true;
         if (isScaling) {
             final int keyCode = event.getKeyCode();
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
