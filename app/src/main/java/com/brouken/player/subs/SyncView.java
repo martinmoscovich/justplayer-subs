@@ -46,9 +46,7 @@ public class SyncView extends FrameLayout {
         void onSeek(long deltaMs);
         void onSeekTo(long positionMs);
         void onTogglePlay();
-        /** ◄ past the leftmost control: switch to the other screen (selection). */
-        void onToggleScreen();
-        /** Back: open the sidebar menu. */
+        /** ◄ past the leftmost control, or Back: move focus to the sidebar (the screen list). */
         void onOpenMenu();
         /** Done button: close the whole panel. */
         void onRequestClose();
@@ -222,7 +220,7 @@ public class SyncView extends FrameLayout {
             case KeyEvent.KEYCODE_DPAD_LEFT:
                 int left = nextEnabled(buttonIndex, -1);
                 if (left == buttonIndex) {
-                    if (listener != null) listener.onToggleScreen(); // already leftmost → other screen
+                    if (listener != null) listener.onOpenMenu(); // already leftmost → sidebar
                 } else {
                     buttonIndex = left;
                     updateButtons();

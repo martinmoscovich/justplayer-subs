@@ -184,12 +184,6 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         if (callbacks != null) callbacks.onSelectOption(optionId);
     }
 
-    @Override public void onToggleScreen() {
-        screen = (screen == Screen.SELECT) ? Screen.SYNC : Screen.SELECT;
-        showScreen();
-        focusContent();
-    }
-
     @Override public void onOpenMenu() {
         focusSidebar();
     }

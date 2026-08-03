@@ -23,9 +23,7 @@ public class SubtitleSelectorView extends ScrollView {
 
     public interface Listener {
         void onSelect(String optionId);
-        /** ◄ — switch to the other screen (sync). */
-        void onToggleScreen();
-        /** Back — open the sidebar menu. */
+        /** ◄ / Back — move focus to the sidebar (the screen list). */
         void onOpenMenu();
         /** Done — close the panel. */
         void onRequestClose();
@@ -94,8 +92,6 @@ public class SubtitleSelectorView extends ScrollView {
                 styleRows();
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (listener != null) listener.onToggleScreen();
-                return true;
             case KeyEvent.KEYCODE_BACK:
                 if (listener != null) listener.onOpenMenu();
                 return true;
