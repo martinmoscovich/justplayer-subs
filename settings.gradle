@@ -2,4 +2,10 @@ plugins {
     id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
 }
 include ':app', ':doubletapplayerview', 'android-file-chooser'
+
+// Subtitle engine lives as a sibling of the fork (player/subtitle-engine-java), included here as a
+// Gradle module so the app can depend on it. Pure JVM, no Android deps.
+include ':subtitle-engine-java'
+project(':subtitle-engine-java').projectDir = new File(settingsDir, '../subtitle-engine-java')
+
 rootProject.name = "Player"

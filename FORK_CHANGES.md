@@ -1,0 +1,21 @@
+# FORK_CHANGES
+
+Changes made to the upstream Just Player (`moneytoo/Player`) in this fork. Keep upstream edits to a
+minimum; all new logic lives in new packages. Each modified upstream file is listed here with the
+reason, so rebases against `upstream` stay tractable.
+
+## Modified upstream files
+
+| File | Change | Reason |
+|---|---|---|
+| `settings.gradle` | Include `:subtitle-engine-java` by relative path (`../subtitle-engine-java`). | Depend on the pure-JVM subtitle engine, which lives as a sibling of the fork (`player/subtitle-engine-java`). |
+| `app/build.gradle` | Add `implementation(project(':subtitle-engine-java'))` excluding the desktop `com.microsoft.onnxruntime:onnxruntime`; add `implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'`. | Use the engine from the app; the engine pulls the desktop ONNX runtime for its CLI, which must not enter the APK — the app provides the Android ONNX build instead (SPEC §10). |
+
+## Added files (not upstream)
+
+| File | Purpose |
+|---|---|
+| `gradle/libs.versions.toml` | Version catalog copied from the `player/` root so the included engine module resolves its `libs.*` accessors inside the fork build. |
+
+<!-- Append new upstream modifications above as the integration proceeds (manifest intent-filter,
+     PlayerActivity hooks for the subtitle overlay, etc.). -->

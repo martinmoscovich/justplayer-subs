@@ -117,4 +117,11 @@ dependencies {
     implementation project(path: ':doubletapplayerview')
     implementation project(path: ':android-file-chooser')
     implementation fileTree(dir: "libs", include: ["lib-*.aar"])
+
+    // Subtitle engine (pure JVM). Exclude the desktop ONNX runtime it pulls for its CLI; the app
+    // provides the Android build of ONNX below (see SPEC §10).
+    implementation(project(':subtitle-engine-java')) {
+        exclude group: 'com.microsoft.onnxruntime', module: 'onnxruntime'
+    }
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'
 }
