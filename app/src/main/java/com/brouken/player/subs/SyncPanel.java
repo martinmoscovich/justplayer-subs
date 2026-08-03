@@ -15,6 +15,7 @@ import androidx.annotation.NonNull;
 import androidx.leanback.widget.VerticalGridView;
 import androidx.recyclerview.widget.RecyclerView;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
@@ -28,45 +29,58 @@ import subtitleengine.sync.SyncTransform;
 /**
  * Manual-sync overlay ("lyrics" style): a scrolling list of dialogue lines over the still-playing
  * video, plus a bottom control row. Fully driven by {@link CustomSubtitleController} (it routes key
- * events here and ticks us with the current position); we never use real view focus, so there is no
- * autoscroll-vs-focus fight.
+ * events here and ticks us with the current position); we never use real view focus.
  *
  * <p>Two focus zones:
  * <ul>
- *   <li><b>CONTROLS</b> (default) — the bottom button row: {@code Sync line}, seek ±, nudge ±,
- *       {@code Done}. Left/right moves, OK activates. Reachable without scrolling the (possibly very
- *       long) cue list.</li>
- *   <li><b>LIST</b> (entered via {@code Sync line}) — pick the line being spoken now: up/down
- *       navigates, <b>OK anchors</b> the selected line to the current position and returns to
- *       CONTROLS, <b>Back</b> cancels (no change) and returns.</li>
+ *   <li><b>CONTROLS</b> (default) — transport row: {@code Sync line}, prev/next segment, seek ±5s,
+ *       play/pause, {@code Done}. Left/right moves (skipping disabled), OK activates; up/down are
+ *       swallowed so they don't disturb the player UI.</li>
+ *   <li><b>LIST</b> (via {@code Sync line}) — up/down navigate, <b>OK anchors</b> and returns,
+ *       <b>left/right nudge ±50 ms</b>, <b>Back</b> cancels.</li>
  * </ul>
- *
- * <p>The top {@link #header} is a placeholder for the future subtitle-selection UI.
  */
 public class SyncPanel extends FrameLayout {
 
     /** Bridge to the player/engine state, implemented by {@link CustomSubtitleController}. */
     public interface Callbacks {
         long currentPositionMs();
+        boolean isPlaying();
         SyncState state();
         void onAnchor(int cueIndex, long cueStartMs, long videoPositionMs);
         void onNudge(long deltaMs);
         void onSeek(long deltaMs);
+        void onSeekTo(long positionMs);
+        void onTogglePlay();
     }
 
     // --- tunables ---
     /** A silence longer than this between consecutive cues starts a new visual segment. */
     public static final long SEGMENT_GAP_MS = 15_000;
+    /** "Prev seg" restarts the current segment if at least this much of it has already played;
+     *  otherwise it jumps to the previous segment. */
+    public static final long SEGMENT_RESTART_MS = 3_000;
+    /** When anchoring, back-date the video position by this much to absorb the user's reaction time. */
+    public static final long REACTION_TIME_MS = 250;
     private static final long NUDGE_MS = 50;
-    private static final long SEEK_SHORT_MS = 5_000;
-    private static final long SEEK_LONG_MS = 10_000;
+    private static final long SEEK_MS = 5_000;
+    /** Segment jumps land this much before the segment start, so the first line isn't missed. */
+    private static final long SEGMENT_LEAD_MS = 800;
+
+    private static final long NO_TARGET = Long.MIN_VALUE;
 
     // --- colors ---
     private static final int COLOR_DIM = 0x80FFFFFF;      // idle line
     private static final int COLOR_ACTIVE = 0xFF4DD0E1;   // line playing now (teal, not white)
     private static final int COLOR_FOCUS_TEXT = 0xFFFFFFFF;
-    private static final int FOCUS_BG = 0x33FFFFFF;       // selected line background (LIST mode)
-    private static final int SEGMENT_DIVIDER = 0x33FFFFFF;
+    private static final int COLOR_DISABLED = 0x40FFFFFF;  // greyed-out button
+    private static final int FOCUS_BG = 0x33FFFFFF;
+    private static final int SEGMENT_LABEL = 0xB0B0BEC5;
+
+    // button indices
+    private static final int PREV_SEG_INDEX = 1;
+    private static final int PLAY_PAUSE_INDEX = 3;
+    private static final int NEXT_SEG_INDEX = 5;
 
     private enum Zone { CONTROLS, LIST }
 
@@ -78,17 +92,20 @@ public class SyncPanel extends FrameLayout {
 
     private final TextView header;
     private final TextView readout;
+    private final TextView hint;
     private final VerticalGridView list;
     private final LinearLayout buttonRow;
     private final CueAdapter adapter = new CueAdapter();
     private final Btn[] buttons;
     private final TextView[] buttonViews;
+    private final boolean[] enabled;
 
     private Callbacks callbacks;
     private List<SubtitleEntry> cues = Collections.emptyList();
     private boolean autoscroll = true;
     private Zone zone = Zone.CONTROLS;
     private int buttonIndex = 0;
+    private boolean lastPlaying = true;
 
     public SyncPanel(Context context) {
         super(context);
@@ -114,19 +131,25 @@ public class SyncPanel extends FrameLayout {
         FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
         llp.topMargin = dp(70);
-        llp.bottomMargin = dp(64);
+        llp.bottomMargin = dp(104);
         addView(list, llp);
+
+        hint = label(13, 0xFF90A4AE);
+        hint.setPadding(dp(24), dp(6), dp(24), dp(4));
+        addView(hint, lp(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, dp(56)));
 
         buttons = new Btn[]{
                 new Btn("Sync line", this::enterListMode),
-                new Btn("-10s", () -> seek(-SEEK_LONG_MS)),
-                new Btn("-5s", () -> seek(-SEEK_SHORT_MS)),
-                new Btn("+5s", () -> seek(SEEK_SHORT_MS)),
-                new Btn("+10s", () -> seek(SEEK_LONG_MS)),
-                new Btn("-50ms", () -> nudge(-NUDGE_MS)),
-                new Btn("+50ms", () -> nudge(NUDGE_MS)),
+                new Btn("|« Prev seg", this::seekPrevSegment),
+                new Btn("« 5s", () -> seek(-SEEK_MS)),
+                new Btn("⏸", this::togglePlay),
+                new Btn("5s »", () -> seek(SEEK_MS)),
+                new Btn("Next seg »|", this::seekNextSegment),
                 new Btn("Done", this::close),
         };
+        enabled = new boolean[buttons.length];
+        for (int i = 0; i < enabled.length; i++) enabled[i] = true;
+
         buttonRow = new LinearLayout(context);
         buttonRow.setOrientation(LinearLayout.HORIZONTAL);
         buttonRow.setGravity(Gravity.CENTER);
@@ -135,9 +158,9 @@ public class SyncPanel extends FrameLayout {
         for (int i = 0; i < buttons.length; i++) {
             TextView b = label(14, COLOR_FOCUS_TEXT);
             b.setText(buttons[i].label);
-            b.setPadding(dp(16), dp(8), dp(16), dp(8));
-            LinearLayout.LayoutParams blp =
-                    new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            b.setPadding(dp(14), dp(8), dp(14), dp(8));
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             blp.leftMargin = dp(4);
             blp.rightMargin = dp(4);
             buttonRow.addView(b, blp);
@@ -168,6 +191,7 @@ public class SyncPanel extends FrameLayout {
         setVisibility(VISIBLE);
         updateReadout();
         updateButtons();
+        updateHint();
         int idx = scrollTargetIndex(pos());
         if (idx >= 0) list.setSelectedPosition(idx);
     }
@@ -176,22 +200,27 @@ public class SyncPanel extends FrameLayout {
         setVisibility(GONE);
     }
 
-    /** Called by the controller's poll loop while open, to drive autoscroll and the "now" marker. */
+    /** Called by the controller's poll loop while open, to drive autoscroll and refresh state. */
     public void onTick(long positionMs) {
         if (!isOpen()) return;
-        adapter.setActiveIndex(strictActiveIndex(positionMs)); // teal highlight, or none in gaps
+        adapter.setActiveIndex(strictActiveIndex(positionMs));
         if (autoscroll) {
-            int target = scrollTargetIndex(positionMs);        // active, or nearest previous
+            int target = scrollTargetIndex(positionMs);
             if (target >= 0 && target != list.getSelectedPosition()) {
                 list.setSelectedPositionSmooth(target);
             }
         }
+        boolean playing = callbacks != null && callbacks.isPlaying();
+        if (playing != lastPlaying) {
+            lastPlaying = playing;
+            buttonViews[PLAY_PAUSE_INDEX].setText(playing ? "⏸" : "▶");
+        }
+        updateButtons(); // refresh prev/next-segment enabled state as playback moves
     }
 
-    /** Handles a key while the panel is open. Returns true if consumed. */
     public boolean handleKey(KeyEvent event) {
         if (event.getAction() != KeyEvent.ACTION_DOWN) {
-            return isNavKey(event.getKeyCode()); // swallow the matching UP
+            return isNavKey(event.getKeyCode());
         }
         return zone == Zone.LIST ? handleListKey(event.getKeyCode()) : handleControlsKey(event.getKeyCode());
     }
@@ -201,17 +230,20 @@ public class SyncPanel extends FrameLayout {
     private boolean handleControlsKey(int keyCode) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                buttonIndex = Math.max(0, buttonIndex - 1);
+                buttonIndex = nextEnabled(buttonIndex, -1);
                 updateButtons();
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                buttonIndex = Math.min(buttons.length - 1, buttonIndex + 1);
+                buttonIndex = nextEnabled(buttonIndex, 1);
                 updateButtons();
                 return true;
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                return true; // swallow so the player UI doesn't react
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                buttons[buttonIndex].action.run();
+                if (enabled[buttonIndex]) buttons[buttonIndex].action.run();
                 return true;
             case KeyEvent.KEYCODE_BACK:
                 close();
@@ -221,7 +253,17 @@ public class SyncPanel extends FrameLayout {
         }
     }
 
-    // --- LIST zone (choosing the line to anchor) ---
+    private int nextEnabled(int from, int dir) {
+        int i = from;
+        while (true) {
+            int n = i + dir;
+            if (n < 0 || n >= buttons.length) return from;
+            i = n;
+            if (enabled[i]) return i;
+        }
+    }
+
+    // --- LIST zone ---
 
     private void enterListMode() {
         zone = Zone.LIST;
@@ -229,6 +271,7 @@ public class SyncPanel extends FrameLayout {
         if (idx >= 0) list.setSelectedPosition(idx);
         adapter.setSelectedIndex(list.getSelectedPosition());
         updateButtons();
+        updateHint();
     }
 
     private boolean handleListKey(int keyCode) {
@@ -240,6 +283,12 @@ public class SyncPanel extends FrameLayout {
             case KeyEvent.KEYCODE_DPAD_DOWN:
                 autoscroll = false;
                 moveSelection(1);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                nudge(-NUDGE_MS);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                nudge(NUDGE_MS);
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
@@ -258,8 +307,9 @@ public class SyncPanel extends FrameLayout {
     private void exitListMode(boolean anchored) {
         zone = Zone.CONTROLS;
         adapter.setSelectedIndex(-1);
-        if (anchored) autoscroll = true; // resume following playback after a successful anchor
+        if (anchored) autoscroll = true;
         updateButtons();
+        updateHint();
         updateReadout();
     }
 
@@ -274,11 +324,26 @@ public class SyncPanel extends FrameLayout {
         int p = list.getSelectedPosition();
         if (callbacks == null || p < 0 || p >= cues.size()) return;
         SubtitleEntry e = cues.get(p);
-        callbacks.onAnchor(e.getIndex(), e.getStartMs(), pos());
+        long videoPos = Math.max(0, pos() - REACTION_TIME_MS);
+        callbacks.onAnchor(e.getIndex(), e.getStartMs(), videoPos);
     }
 
     private void seek(long deltaMs) {
         if (callbacks != null) callbacks.onSeek(deltaMs);
+    }
+
+    private void togglePlay() {
+        if (callbacks != null) callbacks.onTogglePlay();
+    }
+
+    private void seekNextSegment() {
+        long t = nextSegmentTarget(pos());
+        if (t != NO_TARGET && callbacks != null) callbacks.onSeekTo(Math.max(0, t));
+    }
+
+    private void seekPrevSegment() {
+        long t = prevSegmentTarget(pos());
+        if (t != NO_TARGET && callbacks != null) callbacks.onSeekTo(Math.max(0, t));
     }
 
     private void nudge(long deltaMs) {
@@ -288,21 +353,62 @@ public class SyncPanel extends FrameLayout {
         }
     }
 
+    // --- segments ---
+
+    /** Cue indices that start a segment (index 0, and any cue preceded by a long silence). */
+    private List<Integer> segmentStarts() {
+        List<Integer> starts = new ArrayList<>();
+        for (int i = 0; i < cues.size(); i++) {
+            if (i == 0 || cues.get(i).getStartMs() - cues.get(i - 1).getEndMs() > SEGMENT_GAP_MS) {
+                starts.add(i);
+            }
+        }
+        return starts;
+    }
+
+    /** Adjusted start time of the next segment after {@code pos}, minus lead; {@link #NO_TARGET} if none. */
+    private long nextSegmentTarget(long positionMs) {
+        SyncState st = state();
+        for (Integer cueIdx : segmentStarts()) {
+            long start = SyncResolver.adjust(st, cues.get(cueIdx).getStartMs());
+            if (start > positionMs + 1_000) return start - SEGMENT_LEAD_MS;
+        }
+        return NO_TARGET;
+    }
+
+    /**
+     * Target for "Prev seg": the current segment's start if &ge; {@link #SEGMENT_RESTART_MS} into it,
+     * otherwise the previous segment's start. {@link #NO_TARGET} when in (or before) the first segment.
+     */
+    private long prevSegmentTarget(long positionMs) {
+        SyncState st = state();
+        List<Integer> starts = segmentStarts();
+        int cur = -1;
+        for (int k = 0; k < starts.size(); k++) {
+            if (SyncResolver.adjust(st, cues.get(starts.get(k)).getStartMs()) <= positionMs) cur = k;
+            else break;
+        }
+        if (cur <= 0) return NO_TARGET; // first segment (or before it): nowhere to go back to
+        long curStart = SyncResolver.adjust(st, cues.get(starts.get(cur)).getStartMs());
+        long target = (positionMs - curStart >= SEGMENT_RESTART_MS)
+                ? curStart
+                : SyncResolver.adjust(st, cues.get(starts.get(cur - 1)).getStartMs());
+        return target - SEGMENT_LEAD_MS;
+    }
+
     // --- highlight / scroll helpers ---
 
-    /** Index of the cue whose adjusted window contains {@code pos}; -1 in a gap. */
     private int strictActiveIndex(long positionMs) {
         SyncState st = state();
         for (int i = 0; i < cues.size(); i++) {
             SubtitleEntry e = cues.get(i);
             long start = SyncResolver.adjust(st, e.getStartMs());
-            if (start > positionMs) return -1;              // before this cue: in a gap
+            if (start > positionMs) return -1;
             if (positionMs <= SyncResolver.adjust(st, e.getEndMs())) return i;
         }
         return -1;
     }
 
-    /** Where the list should center: the active cue, or the nearest previous one. */
     private int scrollTargetIndex(long positionMs) {
         SyncState st = state();
         int last = -1;
@@ -330,13 +436,35 @@ public class SyncPanel extends FrameLayout {
     }
 
     private void updateButtons() {
+        long p = pos();
+        enabled[PREV_SEG_INDEX] = prevSegmentTarget(p) != NO_TARGET;
+        enabled[NEXT_SEG_INDEX] = nextSegmentTarget(p) != NO_TARGET;
+
         boolean controls = zone == Zone.CONTROLS;
-        for (int i = 0; i < buttonViews.length; i++) {
-            boolean focused = controls && i == buttonIndex;
-            TextView b = buttonViews[i];
-            b.setTextColor(focused ? 0xFF000000 : (controls ? COLOR_FOCUS_TEXT : COLOR_DIM));
-            b.setBackgroundColor(focused ? 0xFFFFFFFF : Color.TRANSPARENT);
+        if (controls && !enabled[buttonIndex]) {
+            int e = nextEnabled(buttonIndex, 1);
+            if (e == buttonIndex) e = nextEnabled(buttonIndex, -1);
+            buttonIndex = e;
         }
+        for (int i = 0; i < buttonViews.length; i++) {
+            TextView b = buttonViews[i];
+            if (!enabled[i]) {
+                b.setTextColor(COLOR_DISABLED);
+                b.setBackgroundColor(Color.TRANSPARENT);
+            } else if (controls && i == buttonIndex) {
+                b.setTextColor(0xFF000000);
+                b.setBackgroundColor(0xFFFFFFFF);
+            } else {
+                b.setTextColor(controls ? COLOR_FOCUS_TEXT : COLOR_DIM);
+                b.setBackgroundColor(Color.TRANSPARENT);
+            }
+        }
+    }
+
+    private void updateHint() {
+        hint.setText(zone == Zone.LIST
+                ? "▲ ▼ choose line   ·   ◄ ► nudge ±50ms   ·   OK: anchor here   ·   Back: cancel"
+                : "◄ ► move   ·   OK: select   ·   'Sync line' to anchor the spoken line");
     }
 
     private void updateReadout() {
@@ -380,11 +508,11 @@ public class SyncPanel extends FrameLayout {
         return Math.round(v * getResources().getDisplayMetrics().density);
     }
 
-    // --- list adapter: one dialogue cue per row, with segment dividers ---
+    // --- list adapter ---
 
     private class CueAdapter extends RecyclerView.Adapter<CueAdapter.VH> {
-        private int activeIndex = -1;   // playing now (teal)
-        private int selectedIndex = -1; // D-pad cursor in LIST mode (white + bg)
+        private int activeIndex = -1;
+        private int selectedIndex = -1;
 
         void setActiveIndex(int idx) {
             if (idx == activeIndex) return;
@@ -408,18 +536,16 @@ public class SyncPanel extends FrameLayout {
             Context ctx = parent.getContext();
             LinearLayout root = new LinearLayout(ctx);
             root.setOrientation(LinearLayout.VERTICAL);
-            // ViewGroup.LayoutParams (not RecyclerView's): leanback converts these to its own type;
-            // a RecyclerView.LayoutParams would fail its internal cast during layout.
             root.setLayoutParams(new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            View divider = new View(ctx);
-            divider.setBackgroundColor(SEGMENT_DIVIDER);
-            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(140), dp(1));
-            dlp.gravity = Gravity.CENTER_HORIZONTAL;
-            dlp.topMargin = dp(20);
-            dlp.bottomMargin = dp(20);
-            root.addView(divider, dlp);
+            TextView divider = new TextView(ctx);
+            divider.setGravity(Gravity.CENTER);
+            divider.setTextColor(SEGMENT_LABEL);
+            divider.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15); // silence gap label, a bit larger
+            divider.setPadding(0, dp(16), 0, dp(16));
+            root.addView(divider, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
             TextView tv = new TextView(ctx);
             tv.setGravity(Gravity.CENTER);
@@ -435,7 +561,6 @@ public class SyncPanel extends FrameLayout {
         @Override
         public void onBindViewHolder(@NonNull VH h, int position) {
             SubtitleEntry e = cues.get(position);
-            // Preserve separate dialogue lines (\n); long single lines wrap naturally.
             h.text.setText(String.join("\n", e.getLines()));
 
             boolean active = position == activeIndex;
@@ -444,10 +569,13 @@ public class SyncPanel extends FrameLayout {
             h.text.setBackgroundColor(selected ? FOCUS_BG : Color.TRANSPARENT);
             h.text.setTextSize(TypedValue.COMPLEX_UNIT_SP, active || selected ? 20 : 18);
 
-            // Segment divider: shown when this cue follows a long silence.
-            boolean segmentBreak = position > 0
-                    && (e.getStartMs() - cues.get(position - 1).getEndMs()) > SEGMENT_GAP_MS;
-            h.divider.setVisibility(segmentBreak ? View.VISIBLE : View.GONE);
+            long gap = position > 0 ? e.getStartMs() - cues.get(position - 1).getEndMs() : 0;
+            if (gap > SEGMENT_GAP_MS) {
+                h.divider.setText("— " + Math.round(gap / 1000.0) + "s —");
+                h.divider.setVisibility(View.VISIBLE);
+            } else {
+                h.divider.setVisibility(View.GONE);
+            }
         }
 
         @Override
@@ -457,8 +585,8 @@ public class SyncPanel extends FrameLayout {
 
         class VH extends RecyclerView.ViewHolder {
             final TextView text;
-            final View divider;
-            VH(View root, TextView text, View divider) {
+            final TextView divider;
+            VH(View root, TextView text, TextView divider) {
                 super(root);
                 this.text = text;
                 this.divider = divider;
