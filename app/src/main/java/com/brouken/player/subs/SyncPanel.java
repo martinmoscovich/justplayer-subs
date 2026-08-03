@@ -61,7 +61,7 @@ public class SyncPanel extends FrameLayout {
      *  otherwise it jumps to the previous segment. */
     public static final long SEGMENT_RESTART_MS = 3_000;
     /** When anchoring, back-date the video position by this much to absorb the user's reaction time. */
-    public static final long REACTION_TIME_MS = 250;
+    public static final long REACTION_TIME_MS = 200;
     private static final long NUDGE_MS = 50;
     private static final long SEEK_MS = 5_000;
     /** Segment jumps land this much before the segment start, so the first line isn't missed. */
