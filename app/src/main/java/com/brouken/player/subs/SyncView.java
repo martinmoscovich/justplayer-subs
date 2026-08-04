@@ -52,13 +52,15 @@ public class SyncView extends FrameLayout {
         void onRequestClose();
     }
 
-    public static final long SEGMENT_GAP_MS = 15_000;
-    public static final long SEGMENT_RESTART_MS = 3_000;
-    public static final long REACTION_TIME_MS = 200;
-    private static final long NUDGE_MS = 50;
-    private static final long SEEK_MS = 5_000;
     private static final long SEGMENT_LEAD_MS = 800;
     private static final long NO_TARGET = Long.MIN_VALUE;
+
+    // Configurable via SubtitleSettings (defaults match the previous constants).
+    private long segmentGapMs = 15_000;
+    private long segmentRestartMs = 3_000;
+    private long reactionTimeMs = 200;
+    private long nudgeMs = 50;
+    private long seekMs = 5_000;
 
     private static final int COLOR_DIM = 0x80FFFFFF;
     private static final int COLOR_ACTIVE = 0xFF4DD0E1;
@@ -105,6 +107,7 @@ public class SyncView extends FrameLayout {
 
     public SyncView(Context context) {
         super(context);
+        loadSettings(context);
 
         readout = label(15, Color.WHITE);
         readout.setPadding(dp(24), dp(2), dp(24), dp(8));
@@ -139,9 +142,9 @@ public class SyncView extends FrameLayout {
         buttons = new Btn[]{
                 new Btn("Sync line", this::enterListMode),
                 new Btn("|« Prev seg", this::seekPrevSegment),
-                new Btn("« 5s", () -> seek(-SEEK_MS)),
+                new Btn("« " + (seekMs / 1000) + "s", () -> seek(-seekMs)),
                 new Btn("⏸", this::togglePlay),
-                new Btn("5s »", () -> seek(SEEK_MS)),
+                new Btn((seekMs / 1000) + "s »", () -> seek(seekMs)),
                 new Btn("Next seg »|", this::seekNextSegment),
                 new Btn("Done", this::requestClose),
         };
@@ -279,10 +282,10 @@ public class SyncView extends FrameLayout {
                 moveSelection(1);
                 return true;
             case KeyEvent.KEYCODE_DPAD_LEFT:
-                nudge(-NUDGE_MS);
+                nudge(-nudgeMs);
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
-                nudge(NUDGE_MS);
+                nudge(nudgeMs);
                 return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
@@ -318,7 +321,7 @@ public class SyncView extends FrameLayout {
         int p = list.getSelectedPosition();
         if (listener == null || p < 0 || p >= cues.size()) return;
         SubtitleEntry e = cues.get(p);
-        long videoPos = Math.max(0, pos() - REACTION_TIME_MS);
+        long videoPos = Math.max(0, pos() - reactionTimeMs);
         listener.onAnchor(e.getIndex(), e.getStartMs(), videoPos);
     }
 
@@ -356,7 +359,7 @@ public class SyncView extends FrameLayout {
     private List<Integer> segmentStarts() {
         List<Integer> starts = new ArrayList<>();
         for (int i = 0; i < cues.size(); i++) {
-            if (i == 0 || cues.get(i).getStartMs() - cues.get(i - 1).getEndMs() > SEGMENT_GAP_MS) {
+            if (i == 0 || cues.get(i).getStartMs() - cues.get(i - 1).getEndMs() > segmentGapMs) {
                 starts.add(i);
             }
         }
@@ -382,7 +385,7 @@ public class SyncView extends FrameLayout {
         }
         if (cur <= 0) return NO_TARGET;
         long curStart = SyncResolver.adjust(st, cues.get(starts.get(cur)).getStartMs());
-        long target = (positionMs - curStart >= SEGMENT_RESTART_MS)
+        long target = (positionMs - curStart >= segmentRestartMs)
                 ? curStart
                 : SyncResolver.adjust(st, cues.get(starts.get(cur - 1)).getStartMs());
         return target - SEGMENT_LEAD_MS;
@@ -463,6 +466,14 @@ public class SyncView extends FrameLayout {
 
     private long pos() {
         return listener != null ? listener.currentPositionMs() : 0L;
+    }
+
+    private void loadSettings(Context c) {
+        reactionTimeMs = SubtitleSettings.getLong(c, SubtitleSettings.KEY_REACTION_MS, reactionTimeMs);
+        nudgeMs = SubtitleSettings.getLong(c, SubtitleSettings.KEY_NUDGE_MS, nudgeMs);
+        seekMs = SubtitleSettings.getLong(c, SubtitleSettings.KEY_SEEK_S, seekMs / 1000) * 1000;
+        segmentGapMs = SubtitleSettings.getLong(c, SubtitleSettings.KEY_SEGMENT_GAP_S, segmentGapMs / 1000) * 1000;
+        segmentRestartMs = SubtitleSettings.getLong(c, SubtitleSettings.KEY_SEGMENT_RESTART_S, segmentRestartMs / 1000) * 1000;
     }
 
     private TextView label(int sp, int color) {
@@ -547,7 +558,7 @@ public class SyncView extends FrameLayout {
             h.text.setTextSize(TypedValue.COMPLEX_UNIT_SP, active || selected ? 20 : 18);
 
             long gap = position > 0 ? e.getStartMs() - cues.get(position - 1).getEndMs() : 0;
-            if (gap > SEGMENT_GAP_MS) {
+            if (gap > segmentGapMs) {
                 h.divider.setText("— " + Math.round(gap / 1000.0) + "s —");
                 h.divider.setVisibility(View.VISIBLE);
             } else {

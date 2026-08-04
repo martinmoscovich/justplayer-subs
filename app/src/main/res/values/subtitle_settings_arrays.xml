@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="subtitle_language_names">
+        <item>English</item>
+        <item>Spanish</item>
+        <item>Spanish (Latin America)</item>
+        <item>Portuguese</item>
+        <item>Portuguese (Brazil)</item>
+        <item>French</item>
+        <item>German</item>
+        <item>Italian</item>
+        <item>Dutch</item>
+        <item>Russian</item>
+        <item>Japanese</item>
+        <item>Korean</item>
+        <item>Chinese</item>
+    </string-array>
+    <string-array name="subtitle_language_codes">
+        <item>en</item>
+        <item>es</item>
+        <item>es-419</item>
+        <item>pt</item>
+        <item>pt-BR</item>
+        <item>fr</item>
+        <item>de</item>
+        <item>it</item>
+        <item>nl</item>
+        <item>ru</item>
+        <item>ja</item>
+        <item>ko</item>
+        <item>zh</item>
+    </string-array>
+    <string-array name="ai_provider_entries">
+        <item>OpenRouter</item>
+        <item>Gemini</item>
+    </string-array>
+    <string-array name="ai_provider_values">
+        <item>openrouter</item>
+        <item>gemini</item>
+    </string-array>
+</resources>

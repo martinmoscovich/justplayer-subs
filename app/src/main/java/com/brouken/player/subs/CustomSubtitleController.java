@@ -33,6 +33,7 @@ public class CustomSubtitleController
     private static final long POLL_MS = 100;
     private static final int KEY_OPEN_PANEL = KeyEvent.KEYCODE_CAPTIONS;
 
+    private final Context context;
     private final ExoPlayer player;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final SubtitleSyncController sync;
@@ -42,6 +43,7 @@ public class CustomSubtitleController
 
     public CustomSubtitleController(Context context, ViewGroup root, ExoPlayer player,
                                     DefaultTrackSelector trackSelector) {
+        this.context = context;
         this.player = player;
 
         sync = new SubtitleSyncController(context);
@@ -131,6 +133,14 @@ public class CustomSubtitleController
 
     @Override public void onSelectOption(String optionId) {
         selection.selectOption(optionId);
+    }
+
+    @Override public void onOpenSettings() {
+        android.content.Intent i = new android.content.Intent(context, SubtitleSettingsActivity.class);
+        if (!(context instanceof android.app.Activity)) {
+            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
+        context.startActivity(i);
     }
 
     // --- SubtitleSelectionController.Listener ---

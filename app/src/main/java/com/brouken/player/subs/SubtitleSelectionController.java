@@ -63,9 +63,6 @@ public class SubtitleSelectionController {
     private final Listener listener;
     private final Handler mainHandler;
 
-    /** Dedicated prefs file (not Just Player's) holding subtitle settings; secret never hardcoded. */
-    private static final String PREFS_FILE = "subtitle_prefs";
-    private static final String PREF_OPENSUBTITLES_KEY = "opensubtitles_api_key";
     private static final int MAX_PROVIDER_RESULTS = 12;
 
     private final List<SubtitleOption> externalOptions = new ArrayList<>();
@@ -236,8 +233,7 @@ public class SubtitleSelectionController {
 
     private void maybeSearchProvider() {
         if (providerSearched) return;
-        String apiKey = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
-                .getString(PREF_OPENSUBTITLES_KEY, null);
+        String apiKey = SubtitleSettings.getString(context, SubtitleSettings.KEY_OPENSUBTITLES, null);
         if (TextUtils.isEmpty(apiKey)) return; // no key configured → no provider search
         String title = mediaTitle();
         if (TextUtils.isEmpty(title)) return;
@@ -283,8 +279,7 @@ public class SubtitleSelectionController {
         if (opt.providerRef == null) return;
         opt.state = SubtitleOption.State.LOADING;
         refresh();
-        String apiKey = context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
-                .getString(PREF_OPENSUBTITLES_KEY, "");
+        String apiKey = SubtitleSettings.getString(context, SubtitleSettings.KEY_OPENSUBTITLES, "");
         new Thread(() -> {
             SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
             try {
@@ -306,11 +301,19 @@ public class SubtitleSelectionController {
     }
 
     private List<String> searchLanguages() {
+        // Search for the languages the user wants to read or translate from (target ∪ source).
         Set<String> langs = new LinkedHashSet<>();
-        String dev = Locale.getDefault().getLanguage();
-        if (!TextUtils.isEmpty(dev)) langs.add(dev);
-        langs.add("en");
-        return new ArrayList<>(langs);
+        langs.addAll(SubtitleSettings.getStringSet(context, SubtitleSettings.KEY_TARGET_LANGS));
+        langs.addAll(SubtitleSettings.getStringSet(context, SubtitleSettings.KEY_SOURCE_LANGS));
+        if (langs.isEmpty()) { // sensible default when nothing configured
+            String dev = Locale.getDefault().getLanguage();
+            if (!TextUtils.isEmpty(dev)) langs.add(dev);
+            langs.add("en");
+        }
+        // OpenSubtitles expects primary subtags (es-419 -> es).
+        Set<String> primary = new LinkedHashSet<>();
+        for (String l : langs) primary.add(l.split("-")[0]);
+        return new ArrayList<>(primary);
     }
 
     // --- embedded (hand back to Media3) ---

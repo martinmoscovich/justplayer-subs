@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <PreferenceCategory app:title="General">
+        <MultiSelectListPreference
+            app:key="pref_source_languages"
+            app:title="Preferred source languages"
+            app:summary="Languages to search and translate from, in order of preference"
+            app:entries="@array/subtitle_language_names"
+            app:entryValues="@array/subtitle_language_codes" />
+        <MultiSelectListPreference
+            app:key="pref_target_languages"
+            app:title="Target languages"
+            app:summary="Preferred subtitle languages to show / translate to"
+            app:entries="@array/subtitle_language_names"
+            app:entryValues="@array/subtitle_language_codes" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Selection">
+        <EditTextPreference
+            app:key="opensubtitles_api_key"
+            app:title="OpenSubtitles API key"
+            app:dialogTitle="OpenSubtitles API key"
+            app:summary="Required to search OpenSubtitles"
+            app:useSimpleSummaryProvider="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Sync">
+        <EditTextPreference
+            app:key="pref_reaction_ms"
+            app:title="Reaction time (ms)"
+            app:summary="Anchoring is back-dated by this much to absorb your reaction time"
+            app:defaultValue="200" />
+        <EditTextPreference
+            app:key="pref_nudge_ms"
+            app:title="Nudge step (ms)"
+            app:defaultValue="50" />
+        <EditTextPreference
+            app:key="pref_seek_s"
+            app:title="Seek step (s)"
+            app:defaultValue="5" />
+        <EditTextPreference
+            app:key="pref_segment_gap_s"
+            app:title="Segment gap (s)"
+            app:summary="A silence longer than this starts a new dialogue segment"
+            app:defaultValue="15" />
+        <EditTextPreference
+            app:key="pref_segment_restart_s"
+            app:title="Prev-segment restart threshold (s)"
+            app:summary="'Prev seg' restarts the current segment if you are at least this far into it"
+            app:defaultValue="3" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Translation">
+        <ListPreference
+            app:key="pref_ai_provider"
+            app:title="AI provider"
+            app:entries="@array/ai_provider_entries"
+            app:entryValues="@array/ai_provider_values"
+            app:defaultValue="openrouter"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="pref_ai_model"
+            app:title="Model"
+            app:defaultValue="google/gemini-2.5-flash"
+            app:useSimpleSummaryProvider="true" />
+        <EditTextPreference
+            app:key="pref_ai_api_key"
+            app:title="AI API key"
+            app:dialogTitle="AI API key"
+            app:summary="OpenRouter / Gemini API key" />
+    </PreferenceCategory>
+
+</PreferenceScreen>

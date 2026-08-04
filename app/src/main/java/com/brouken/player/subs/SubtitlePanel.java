@@ -36,10 +36,12 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         void onSeekTo(long positionMs);
         void onTogglePlay();
         void onSelectOption(String optionId);
+        void onOpenSettings();
     }
 
     private enum Screen { SELECT, SYNC }
     private enum Focus { SIDEBAR, CONTENT }
+    private static final int SIDEBAR_SETTINGS = 2;
 
     private final LinearLayout sidebar;
     private final TextView[] sidebarItems;
@@ -47,8 +49,9 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
     private final SyncView syncView;
 
     private Callbacks callbacks;
-    private Screen screen = Screen.SYNC;
+    private Screen screen = Screen.SELECT;
     private Focus focus = Focus.SIDEBAR;
+    private int sidebarIndex = 0; // 0=Subtitles, 1=Sync, 2=Settings
 
     public SubtitlePanel(Context context) {
         super(context);
@@ -68,7 +71,7 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(dp(180), ViewGroup.LayoutParams.MATCH_PARENT);
         row.addView(sidebar, sbLp);
 
-        sidebarItems = new TextView[]{ sidebarItem("Subtitles"), sidebarItem("Sync") };
+        sidebarItems = new TextView[]{ sidebarItem("Subtitles"), sidebarItem("Sync"), sidebarItem("⚙ Settings") };
         for (TextView it : sidebarItems) sidebar.addView(it);
 
         FrameLayout content = new FrameLayout(context);
@@ -130,20 +133,22 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
     private boolean handleSidebarKey(int keyCode) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_UP:
-                screen = Screen.SELECT;
-                showScreen();
-                styleSidebar();
+                sidebarIndex = Math.max(0, sidebarIndex - 1);
+                applySidebar();
                 return true;
             case KeyEvent.KEYCODE_DPAD_DOWN:
-                screen = Screen.SYNC;
-                showScreen();
-                styleSidebar();
+                sidebarIndex = Math.min(sidebarItems.length - 1, sidebarIndex + 1);
+                applySidebar();
                 return true;
             case KeyEvent.KEYCODE_DPAD_RIGHT:
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                focusContent();
+                if (sidebarIndex == SIDEBAR_SETTINGS) {
+                    if (callbacks != null) callbacks.onOpenSettings();
+                } else {
+                    focusContent();
+                }
                 return true;
             case KeyEvent.KEYCODE_BACK:
                 close();
@@ -153,6 +158,18 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         }
     }
 
+    /** Reflects the highlighted sidebar item into the content screen (live preview). */
+    private void applySidebar() {
+        if (sidebarIndex == 0) {
+            screen = Screen.SELECT;
+            showScreen();
+        } else if (sidebarIndex == 1) {
+            screen = Screen.SYNC;
+            showScreen();
+        }
+        styleSidebar();
+    }
+
     private void showScreen() {
         selector.setVisibility(screen == Screen.SELECT ? VISIBLE : GONE);
         syncView.setVisibility(screen == Screen.SYNC ? VISIBLE : GONE);
@@ -160,6 +177,7 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
 
     private void focusSidebar() {
         focus = Focus.SIDEBAR;
+        sidebarIndex = (screen == Screen.SELECT) ? 0 : 1;
         selector.setFocused(false);
         syncView.setFocused(false);
         styleSidebar();
@@ -204,14 +222,14 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
     // --- sidebar rendering ---
 
     private void styleSidebar() {
-        int active = screen == Screen.SELECT ? 0 : 1;
+        int activeScreen = screen == Screen.SELECT ? 0 : 1;
         for (int i = 0; i < sidebarItems.length; i++) {
             TextView it = sidebarItems[i];
-            boolean focused = focus == Focus.SIDEBAR && i == active;
+            boolean focused = focus == Focus.SIDEBAR && i == sidebarIndex;
             if (focused) {
                 it.setTextColor(0xFF000000);
                 it.setBackgroundColor(0xFFFFFFFF);
-            } else if (i == active) {
+            } else if (i == activeScreen) {
                 it.setTextColor(0xFF4DD0E1);
                 it.setBackgroundColor(0x334DD0E1);
             } else {
