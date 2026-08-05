@@ -301,10 +301,8 @@ public class SubtitleSelectionController {
     }
 
     private List<String> searchLanguages() {
-        // Search for the languages the user wants to read or translate from (target ∪ source).
-        Set<String> langs = new LinkedHashSet<>();
-        langs.addAll(SubtitleSettings.getStringSet(context, SubtitleSettings.KEY_TARGET_LANGS));
-        langs.addAll(SubtitleSettings.getStringSet(context, SubtitleSettings.KEY_SOURCE_LANGS));
+        // Search the languages the user wants, in priority order (target first, then source).
+        Set<String> langs = new LinkedHashSet<>(SubtitleSettings.preferredLanguages(context));
         if (langs.isEmpty()) { // sensible default when nothing configured
             String dev = Locale.getDefault().getLanguage();
             if (!TextUtils.isEmpty(dev)) langs.add(dev);
