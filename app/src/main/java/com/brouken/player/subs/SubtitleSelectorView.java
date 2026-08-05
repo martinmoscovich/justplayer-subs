@@ -11,13 +11,19 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+
+import subtitleengine.selection.SubtitleOptionSorter;
 
 /**
- * Subtitle-source selector: a vertical, sectioned list ("Embedded" and "External / Provider", the
- * latter also holding provider results and a "loading more…" row), plus a <b>Done</b> button at the
- * bottom. Picking a subtitle moves focus to Done (a second OK closes the panel); ◄ switches to the
- * sync screen, Back opens the sidebar menu.
+ * Subtitle-source selector: a vertical, sectioned list grouped by the engine's
+ * {@link SubtitleOptionSorter} into <b>Preferred</b> (the user's target languages) and <b>Others</b>,
+ * each ordered by source (embedded first) then language priority; empty sections are hidden and a
+ * note is shown when nothing matches the preferred languages. A <b>Done</b> button sits at the bottom.
+ * Picking a subtitle moves focus to Done (a second OK closes the panel); ◄ switches to the sync
+ * screen, Back opens the sidebar menu.
  */
 public class SubtitleSelectorView extends ScrollView {
 
@@ -41,6 +47,7 @@ public class SubtitleSelectorView extends ScrollView {
 
     private final List<SubtitleOption> ordered = new ArrayList<>();
     private final List<TextView> rowViews = new ArrayList<>();
+    private SubtitleOptionSorter.Result grouping;
     private String selectedId;
     private boolean loadingMore;
     private boolean focused;
@@ -63,12 +70,35 @@ public class SubtitleSelectorView extends ScrollView {
         this.selectedId = selectedId;
         this.loadingMore = loadingMore;
         ordered.clear();
+
+        Map<String, SubtitleOption> byId = new HashMap<>();
+        List<SubtitleOptionSorter.Ref> refs = new ArrayList<>();
         if (options != null) {
-            for (SubtitleOption o : options) if (o.source == SubtitleOption.Source.EMBEDDED) ordered.add(o);
-            for (SubtitleOption o : options) if (o.source != SubtitleOption.Source.EMBEDDED) ordered.add(o);
+            for (SubtitleOption o : options) {
+                byId.put(o.id, o);
+                refs.add(new SubtitleOptionSorter.Ref(o.id, o.language, sorterSource(o.source)));
+            }
+        }
+        List<String> target = SubtitleSettings.getLanguageList(getContext(), SubtitleSettings.KEY_TARGET_LANGS);
+        List<String> source = SubtitleSettings.getLanguageList(getContext(), SubtitleSettings.KEY_SOURCE_LANGS);
+        grouping = SubtitleOptionSorter.group(refs, target, source);
+
+        for (SubtitleOptionSorter.Section s : grouping.sections) {
+            for (String id : s.optionIds) {
+                SubtitleOption o = byId.get(id);
+                if (o != null) ordered.add(o);
+            }
         }
         if (focusIndex > ordered.size()) focusIndex = ordered.size();
         rebuild();
+    }
+
+    private static SubtitleOptionSorter.Source sorterSource(SubtitleOption.Source s) {
+        switch (s) {
+            case EMBEDDED: return SubtitleOptionSorter.Source.EMBEDDED;
+            case PROVIDER: return SubtitleOptionSorter.Source.PROVIDER;
+            default:       return SubtitleOptionSorter.Source.EXTERNAL;
+        }
     }
 
     public void setFocused(boolean f) {
@@ -126,25 +156,21 @@ public class SubtitleSelectorView extends ScrollView {
         column.removeAllViews();
         rowViews.clear();
 
-        boolean anyEmbedded = false, anyExternal = false;
-        for (SubtitleOption o : ordered) {
-            if (o.source == SubtitleOption.Source.EMBEDDED) anyEmbedded = true;
-            else anyExternal = true;
+        // Note (not a section) when there are subtitles but none in the preferred languages.
+        if (grouping != null && grouping.preferredEmpty && grouping.anyOptions) {
+            column.addView(row("No subtitles in your preferred languages", DIM));
         }
 
-        if (anyEmbedded) {
-            column.addView(header("Embedded"));
-            for (SubtitleOption o : ordered) {
-                if (o.source == SubtitleOption.Source.EMBEDDED) addRow(o);
+        int idx = 0;
+        if (grouping != null) {
+            for (SubtitleOptionSorter.Section s : grouping.sections) {
+                column.addView(header(s.title));
+                for (int k = 0; k < s.optionIds.size() && idx < ordered.size(); k++, idx++) {
+                    addRow(ordered.get(idx));
+                }
             }
         }
-        if (anyExternal || loadingMore) {
-            column.addView(header("External / Provider"));
-            for (SubtitleOption o : ordered) {
-                if (o.source != SubtitleOption.Source.EMBEDDED) addRow(o);
-            }
-            if (loadingMore) column.addView(row("⟳ loading more…", DIM));
-        }
+        if (loadingMore) column.addView(row("⟳ loading more…", DIM));
         if (ordered.isEmpty() && !loadingMore) {
             column.addView(row("No subtitles available", DIM));
         }

@@ -12,8 +12,7 @@ import android.widget.TextView;
 
 import java.util.List;
 
-import subtitleengine.core.model.SubtitleFile;
-import subtitleengine.sync.SyncState;
+import subtitleengine.sync.ManualSyncSession;
 
 /**
  * Container for the two subtitle screens, switched via a left sidebar:
@@ -29,12 +28,11 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
     public interface Callbacks {
         long currentPositionMs();
         boolean isPlaying();
-        SyncState state();
-        void onAnchor(int cueIndex, long cueStartMs, long videoPositionMs);
-        void onNudge(long deltaMs);
         void onSeek(long deltaMs);
         void onSeekTo(long positionMs);
         void onTogglePlay();
+        /** An anchor/nudge changed the sync — re-render the overlay immediately. */
+        void onSyncChanged();
         void onSelectOption(String optionId);
         void onOpenSettings();
     }
@@ -97,8 +95,9 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         selector.setOptions(options, selectedId, loadingMore);
     }
 
-    public void bind(SubtitleFile file) {
-        syncView.bind(file);
+    /** Binds the engine sync session (null = nothing syncable) into the sync screen. */
+    public void setSyncSession(ManualSyncSession session) {
+        syncView.setSession(session);
     }
 
     public boolean isOpen() {
@@ -212,9 +211,7 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
 
     @Override public long currentPositionMs() { return callbacks != null ? callbacks.currentPositionMs() : 0L; }
     @Override public boolean isPlaying() { return callbacks != null && callbacks.isPlaying(); }
-    @Override public SyncState state() { return callbacks != null ? callbacks.state() : SyncState.empty(); }
-    @Override public void onAnchor(int i, long s, long v) { if (callbacks != null) callbacks.onAnchor(i, s, v); }
-    @Override public void onNudge(long d) { if (callbacks != null) callbacks.onNudge(d); }
+    @Override public void onSyncChanged() { if (callbacks != null) callbacks.onSyncChanged(); }
     @Override public void onSeek(long d) { if (callbacks != null) callbacks.onSeek(d); }
     @Override public void onSeekTo(long p) { if (callbacks != null) callbacks.onSeekTo(p); }
     @Override public void onTogglePlay() { if (callbacks != null) callbacks.onTogglePlay(); }

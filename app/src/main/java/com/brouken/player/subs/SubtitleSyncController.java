@@ -9,26 +9,22 @@ import android.widget.TextView;
 
 import androidx.annotation.Nullable;
 
-import subtitleengine.core.model.SubtitleEntry;
 import subtitleengine.core.model.SubtitleFile;
-import subtitleengine.sync.AnchorSource;
-import subtitleengine.sync.SyncAnchor;
-import subtitleengine.sync.SyncResolver;
-import subtitleengine.sync.SyncState;
+import subtitleengine.sync.ManualSyncSession;
 
 /**
- * The sync concern: holds the currently-synced subtitle + its {@link SyncState}, renders the active
- * cue in an overlay applying the offset, and applies anchors/nudges. Knows nothing about where the
- * subtitle came from (that is {@link SubtitleSelectionController}).
+ * The sync concern (app side): owns the engine's {@link ManualSyncSession} (all cue/sync logic) and
+ * renders its active cue in an overlay. Knows nothing about where the subtitle came from (that is
+ * {@link SubtitleSelectionController}) — only how to draw it and expose the session to the UI.
  */
 public class SubtitleSyncController {
 
     private final TextView overlay;
-    @Nullable private SubtitleFile file;
-    private SyncState syncState = SyncState.empty();
+    private final ManualSyncSession session;
     private boolean active;
 
     public SubtitleSyncController(Context context) {
+        session = new ManualSyncSession(SubtitleSettings.syncSettings(context));
         overlay = new TextView(context);
         overlay.setTextColor(Color.WHITE);
         overlay.setShadowLayer(6f, 0f, 0f, Color.BLACK);
@@ -42,56 +38,41 @@ public class SubtitleSyncController {
         return overlay;
     }
 
+    /** The engine session — the UI (SyncView) reads cues and issues anchors/nudges through it. */
+    public ManualSyncSession getSession() {
+        return session;
+    }
+
     public boolean isActive() {
         return active;
     }
 
-    public SyncState getState() {
-        return syncState;
-    }
-
-    /** Starts syncing/rendering a subtitle (fresh {@link SyncState}). */
-    public void setSubtitle(SubtitleFile f) {
-        this.file = f;
-        this.syncState = SyncState.empty();
-        this.active = true;
+    /** Starts syncing/rendering a subtitle (fresh sync state). */
+    public void setSubtitle(@Nullable SubtitleFile f) {
+        session.setSubtitle(f);
+        active = f != null;
+        if (!active) {
+            overlay.setText("");
+            overlay.setVisibility(View.GONE);
+        }
     }
 
     /** Stops rendering (e.g. an embedded track was selected — Media3 draws it instead). */
     public void clear() {
-        this.file = null;
-        this.active = false;
+        session.clear();
+        active = false;
         overlay.setText("");
         overlay.setVisibility(View.GONE);
     }
 
-    public void anchor(int cueIndex, long cueStartMs, long videoPositionMs) {
-        syncState = syncState.withAnchorAdded(
-                new SyncAnchor(cueIndex, cueStartMs, videoPositionMs, AnchorSource.MANUAL));
-    }
-
-    public void nudge(long deltaMs) {
-        syncState = syncState.withNudgeShiftedBy(deltaMs);
-    }
-
     /** Updates the overlay for {@code positionMs}. Hidden while the panel is open (it shows lines). */
     public void render(long positionMs, boolean panelOpen) {
-        if (!active || file == null || panelOpen) {
+        if (!active || !session.hasCues() || panelOpen) {
             if (overlay.getVisibility() != View.GONE) overlay.setVisibility(View.GONE);
             return;
         }
         if (overlay.getVisibility() != View.VISIBLE) overlay.setVisibility(View.VISIBLE);
-        String text = activeCueText(positionMs);
+        String text = session.activeCueText(positionMs);
         if (!text.contentEquals(overlay.getText())) overlay.setText(text);
-    }
-
-    private String activeCueText(long positionMs) {
-        for (SubtitleEntry e : file.getEntries()) {
-            long start = SyncResolver.adjust(syncState, e.getStartMs());
-            long end = SyncResolver.adjust(syncState, e.getEndMs());
-            if (positionMs >= start && positionMs <= end) return String.join("\n", e.getLines());
-            if (start > positionMs) break;
-        }
-        return "";
     }
 }

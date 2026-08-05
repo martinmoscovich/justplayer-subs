@@ -17,7 +17,6 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 import java.util.List;
 
 import subtitleengine.core.model.SubtitleFile;
-import subtitleengine.sync.SyncState;
 
 /**
  * Coordinator that wires the two subtitle concerns to the player. It owns the
@@ -100,17 +99,7 @@ public class CustomSubtitleController
 
     @Override public boolean isPlaying() { return player != null && player.isPlaying(); }
 
-    @Override public SyncState state() { return sync.getState(); }
-
-    @Override public void onAnchor(int cueIndex, long cueStartMs, long videoPositionMs) {
-        sync.anchor(cueIndex, cueStartMs, videoPositionMs);
-        renderOverlay();
-    }
-
-    @Override public void onNudge(long deltaMs) {
-        sync.nudge(deltaMs);
-        renderOverlay();
-    }
+    @Override public void onSyncChanged() { renderOverlay(); }
 
     @Override public void onSeek(long deltaMs) {
         onSeekTo((player != null ? player.getCurrentPosition() : 0L) + deltaMs);
@@ -147,13 +136,13 @@ public class CustomSubtitleController
 
     @Override public void onSubtitleLoaded(SubtitleFile file) {
         sync.setSubtitle(file);
-        panel.bind(file);
+        panel.setSyncSession(sync.getSession());
         renderOverlay();
     }
 
     @Override public void onSubtitleCleared() {
         sync.clear();
-        panel.bind(null);
+        panel.setSyncSession(sync.getSession());
     }
 
     @Override public void onOptionsChanged(List<SubtitleOption> options, @Nullable String selectedId,

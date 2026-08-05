@@ -2,8 +2,11 @@ package com.brouken.player.subs;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.text.TextUtils;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -44,6 +47,42 @@ public final class SubtitleSettings {
 
     public static Set<String> getStringSet(Context c, String key) {
         return prefs(c).getStringSet(key, Collections.emptySet());
+    }
+
+    /** Reads an ordered language list (CSV of codes, priority order). */
+    public static List<String> getLanguageList(Context c, String key) {
+        List<String> out = new ArrayList<>();
+        String csv = getString(c, key, "");
+        if (csv != null) {
+            for (String s : csv.split(",")) {
+                String t = s.trim();
+                if (!t.isEmpty()) out.add(t);
+            }
+        }
+        return out;
+    }
+
+    public static void setLanguageList(Context c, String key, List<String> langs) {
+        prefs(c).edit().putString(key, TextUtils.join(",", langs)).apply();
+    }
+
+    /** Ordered preferred languages the user wants to see (target order, then source as fallback). */
+    public static List<String> preferredLanguages(Context c) {
+        List<String> out = new ArrayList<>(getLanguageList(c, KEY_TARGET_LANGS));
+        for (String s : getLanguageList(c, KEY_SOURCE_LANGS)) if (!out.contains(s)) out.add(s);
+        return out;
+    }
+
+    /** Builds the engine's {@link subtitleengine.sync.SyncSettings} from the stored prefs. */
+    public static subtitleengine.sync.SyncSettings syncSettings(Context c) {
+        subtitleengine.sync.SyncSettings d = subtitleengine.sync.SyncSettings.defaults();
+        return new subtitleengine.sync.SyncSettings(
+                getLong(c, KEY_REACTION_MS, d.getReactionMs()),
+                getLong(c, KEY_NUDGE_MS, d.getNudgeMs()),
+                getLong(c, KEY_SEEK_S, d.getSeekMs() / 1000) * 1000,
+                getLong(c, KEY_SEGMENT_GAP_S, d.getSegmentGapMs() / 1000) * 1000,
+                getLong(c, KEY_SEGMENT_RESTART_S, d.getSegmentRestartMs() / 1000) * 1000,
+                d.getSegmentLeadMs());
     }
 
     /** Reads a numeric string preference as a long, falling back to {@code def} when unset/invalid. */
