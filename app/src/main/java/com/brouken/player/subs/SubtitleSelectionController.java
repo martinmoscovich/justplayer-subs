@@ -22,6 +22,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -29,6 +30,7 @@ import java.util.Set;
 
 import okhttp3.OkHttpClient;
 import subtitleengine.core.model.ContentMetadata;
+import subtitleengine.core.model.SearchLanguages;
 import subtitleengine.core.model.SubtitleError;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.parser.SubtitleConverter;
@@ -239,7 +241,7 @@ public class SubtitleSelectionController {
         if (TextUtils.isEmpty(title)) return;
         providerSearched = true;
 
-        List<String> langs = searchLanguages();
+        SearchLanguages langs = searchLanguages();
         loadingMore = true;
         refresh();
 
@@ -247,7 +249,7 @@ public class SubtitleSelectionController {
             SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
             ContentMetadata meta = new ContentMetadata(title, null, null, null, null, null, null, title);
             try {
-                List<SubtitleSearchResult> results = provider.search(meta, langs, null);
+                List<SubtitleSearchResult> results = provider.searchByPriority(meta, langs, null);
                 mainHandler.post(() -> onProviderResults(results));
             } catch (Exception e) {
                 mainHandler.post(() -> onProviderError(e));
@@ -261,8 +263,9 @@ public class SubtitleSelectionController {
         for (SubtitleSearchResult r : results) {
             if (n++ >= MAX_PROVIDER_RESULTS) break;
             String lang = r.getLanguage() != null ? r.getLanguage().toUpperCase(Locale.ROOT) : "?";
-            String label = lang + " · OpenSubtitles ★" + String.format(Locale.ROOT, "%.1f", r.getRating());
-            providerOptions.add(SubtitleOption.provider("prov" + r.getId(), label, r.getLanguage(), r.getId()));
+            String label = lang + " · " + r.getProviderName();
+            providerOptions.add(SubtitleOption.provider(
+                    "prov" + r.getId(), label, r.getLanguage(), r.getId(), r.getRating(), r.getDownloadCount()));
         }
         loadingMore = false;
         refresh();
@@ -300,18 +303,16 @@ public class SubtitleSelectionController {
         return t != null ? t.toString() : null;
     }
 
-    private List<String> searchLanguages() {
+    private SearchLanguages searchLanguages() {
         // Search the languages the user wants, in priority order (target first, then source).
-        Set<String> langs = new LinkedHashSet<>(SubtitleSettings.preferredLanguages(context));
+        SearchLanguages langs = SubtitleSettings.preferredLanguages(context).withoutSuffix();
         if (langs.isEmpty()) { // sensible default when nothing configured
+            List<String> targets = new ArrayList<>();
             String dev = Locale.getDefault().getLanguage();
-            if (!TextUtils.isEmpty(dev)) langs.add(dev);
-            langs.add("en");
+            targets.add(TextUtils.isEmpty(dev) ? "en" : dev);
+            langs = new SearchLanguages(targets, List.of());
         }
-        // OpenSubtitles expects primary subtags (es-419 -> es).
-        Set<String> primary = new LinkedHashSet<>();
-        for (String l : langs) primary.add(l.split("-")[0]);
-        return new ArrayList<>(primary);
+        return langs;
     }
 
     // --- embedded (hand back to Media3) ---

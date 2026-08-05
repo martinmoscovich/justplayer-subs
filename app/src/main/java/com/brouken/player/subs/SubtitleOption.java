@@ -32,10 +32,14 @@ public class SubtitleOption {
     public final int embeddedTextIndex;
     /** PROVIDER: opaque id used to download the result (e.g. OpenSubtitles file id). */
     @Nullable public final String providerRef;
+    /** PROVIDER: rating/download count for display, kept out of {@link #label} so the UI can lay
+     *  them out separately (e.g. right-aligned); 0 elsewhere. */
+    public final float rating;
+    public final int downloadCount;
 
     private SubtitleOption(String id, String label, @Nullable String language, Source source,
                            State state, @Nullable Uri uri, int embeddedTextIndex,
-                           @Nullable String providerRef) {
+                           @Nullable String providerRef, float rating, int downloadCount) {
         this.id = id;
         this.label = label;
         this.language = language;
@@ -44,18 +48,22 @@ public class SubtitleOption {
         this.uri = uri;
         this.embeddedTextIndex = embeddedTextIndex;
         this.providerRef = providerRef;
+        this.rating = rating;
+        this.downloadCount = downloadCount;
     }
 
     public static SubtitleOption external(String id, String label, @Nullable String language, Uri uri) {
-        return new SubtitleOption(id, label, language, Source.EXTERNAL, State.READY, uri, -1, null);
+        return new SubtitleOption(id, label, language, Source.EXTERNAL, State.READY, uri, -1, null, 0f, 0);
     }
 
     public static SubtitleOption embedded(String id, String label, @Nullable String language, int textIndex) {
-        return new SubtitleOption(id, label, language, Source.EMBEDDED, State.READY, null, textIndex, null);
+        return new SubtitleOption(id, label, language, Source.EMBEDDED, State.READY, null, textIndex, null, 0f, 0);
     }
 
-    public static SubtitleOption provider(String id, String label, @Nullable String language, String providerRef) {
-        return new SubtitleOption(id, label, language, Source.PROVIDER, State.READY, null, -1, providerRef);
+    public static SubtitleOption provider(String id, String label, @Nullable String language, String providerRef,
+                                          float rating, int downloadCount) {
+        return new SubtitleOption(id, label, language, Source.PROVIDER, State.READY, null, -1, providerRef,
+                rating, downloadCount);
     }
 
     public boolean isReady() {

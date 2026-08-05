@@ -9,6 +9,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
+import subtitleengine.core.model.SearchLanguages;
+
 /**
  * Central access to the subtitle settings (dedicated {@code subtitle_prefs} file, separate from
  * Just Player's own prefs). Keys mirror {@code res/xml/subtitle_settings.xml}. Secrets are stored
@@ -42,7 +44,14 @@ public final class SubtitleSettings {
     }
 
     public static String getString(Context c, String key, String def) {
-        return prefs(c).getString(key, def);
+        try {
+            return prefs(c).getString(key, def);
+        } catch (ClassCastException e) {
+            // Leftover value of an incompatible type (e.g. from an older pref schema). Drop it
+            // instead of crashing every launch.
+            prefs(c).edit().remove(key).apply();
+            return def;
+        }
     }
 
     public static Set<String> getStringSet(Context c, String key) {
@@ -67,10 +76,11 @@ public final class SubtitleSettings {
     }
 
     /** Ordered preferred languages the user wants to see (target order, then source as fallback). */
-    public static List<String> preferredLanguages(Context c) {
-        List<String> out = new ArrayList<>(getLanguageList(c, KEY_TARGET_LANGS));
-        for (String s : getLanguageList(c, KEY_SOURCE_LANGS)) if (!out.contains(s)) out.add(s);
-        return out;
+    public static SearchLanguages preferredLanguages(Context c) {
+        List<String> targets = new ArrayList<>(getLanguageList(c, KEY_TARGET_LANGS));
+        List<String> sources = new ArrayList<>();
+        for (String s : getLanguageList(c, KEY_SOURCE_LANGS)) if (!targets.contains(s)) sources.add(s);
+        return new SearchLanguages(targets, sources);
     }
 
     /** Builds the engine's {@link subtitleengine.sync.SyncSettings} from the stored prefs. */
