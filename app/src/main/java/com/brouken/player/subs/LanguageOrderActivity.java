@@ -273,7 +273,6 @@ public class LanguageOrderActivity extends AppCompatActivity {
         tv.setTextColor(HEADER);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         tv.setPadding(dp(8), dp(16), dp(8), dp(6));
-        column.addView(tv);
         return tv;
     }
 
@@ -283,7 +282,6 @@ public class LanguageOrderActivity extends AppCompatActivity {
         tv.setTextColor(DIM);
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         tv.setPadding(dp(14), dp(6), dp(14), dp(6));
-        column.addView(tv);
         return tv;
     }
 
