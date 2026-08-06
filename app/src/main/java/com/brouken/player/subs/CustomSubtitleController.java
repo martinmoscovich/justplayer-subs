@@ -38,6 +38,7 @@ public class CustomSubtitleController
     private final SubtitleSyncController sync;
     private final SubtitleSelectionController selection;
     private final SubtitlePanel panel;
+    private final TranslationController translation;
     private boolean ticking;
 
     public CustomSubtitleController(Context context, ViewGroup root, ExoPlayer player,
@@ -56,6 +57,15 @@ public class CustomSubtitleController
         panel.setCallbacks(this);
         root.addView(panel, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        translation = new TranslationController(context, sync, panel, handler, this::renderOverlay);
+        FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        ilp.gravity = Gravity.TOP | Gravity.END;
+        int indicatorMargin = Math.round(16 * context.getResources().getDisplayMetrics().density);
+        ilp.topMargin = indicatorMargin;
+        ilp.rightMargin = indicatorMargin;
+        root.addView(translation.getIndicatorView(), ilp);
 
         selection = new SubtitleSelectionController(context, player, trackSelector, this, handler);
     }
@@ -88,8 +98,10 @@ public class CustomSubtitleController
     public void release() {
         ticking = false;
         handler.removeCallbacksAndMessages(null);
+        translation.release();
         selection.release();
         removeFromParent(sync.getOverlayView());
+        removeFromParent(translation.getIndicatorView());
         removeFromParent(panel);
     }
 
@@ -132,17 +144,25 @@ public class CustomSubtitleController
         context.startActivity(i);
     }
 
+    @Override public void onStartTranslate() { translation.start(); }
+
+    @Override public void onCancelTranslate() { translation.cancel(); }
+
+    @Override public void onRestoreOriginal() { translation.restoreOriginal(); }
+
     // --- SubtitleSelectionController.Listener ---
 
     @Override public void onSubtitleLoaded(SubtitleFile file) {
         sync.setSubtitle(file);
         panel.setSyncSession(sync.getSession());
+        translation.setSource(file, selection.mediaTitle());
         renderOverlay();
     }
 
     @Override public void onSubtitleCleared() {
         sync.clear();
         panel.setSyncSession(sync.getSession());
+        translation.setSource(null, null);
     }
 
     @Override public void onOptionsChanged(List<SubtitleOption> options, @Nullable String selectedId,
@@ -161,6 +181,7 @@ public class CustomSubtitleController
     private void tick() {
         if (!ticking) return;
         renderOverlay();
+        translation.renderIndicator(panel.isOpen());
         panel.onTick(currentPositionMs());
         handler.postDelayed(this::tick, POLL_MS);
     }

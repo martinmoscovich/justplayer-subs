@@ -15,15 +15,17 @@ import java.util.List;
 import subtitleengine.sync.ManualSyncSession;
 
 /**
- * Container for the two subtitle screens, switched via a left sidebar:
+ * Container for the three subtitle screens, switched via a left sidebar:
  * <ul>
  *   <li><b>Subtitles</b> — {@link SubtitleSelectorView} (choose the source).</li>
  *   <li><b>Sync</b> — {@link SyncView} (manual sync of the chosen subtitle).</li>
+ *   <li><b>Translate</b> — {@link TranslateView} (AI-translate the active subtitle).</li>
  * </ul>
  * Focus is either on the sidebar (up/down switch screen, right/OK enter) or on the active screen
  * (left/back return to the sidebar). No domain logic — events go to {@link Callbacks}.
  */
-public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.Listener, SyncView.Listener {
+public class SubtitlePanel extends FrameLayout
+        implements SubtitleSelectorView.Listener, SyncView.Listener, TranslateView.Listener {
 
     public interface Callbacks {
         long currentPositionMs();
@@ -35,21 +37,27 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         void onSyncChanged();
         void onSelectOption(String optionId);
         void onOpenSettings();
+        void onStartTranslate();
+        void onCancelTranslate();
+        void onRestoreOriginal();
     }
 
-    private enum Screen { SELECT, SYNC }
+    private enum Screen { SELECT, SYNC, TRANSLATE }
     private enum Focus { SIDEBAR, CONTENT }
-    private static final int SIDEBAR_SETTINGS = 2;
+    private static final Screen[] SCREENS = Screen.values(); // sidebar index 0..2 = content screens
+    private static final int SIDEBAR_SETTINGS = 3;
 
     private final LinearLayout sidebar;
     private final TextView[] sidebarItems;
     private final SubtitleSelectorView selector;
     private final SyncView syncView;
+    private final TranslateView translateView;
+    private boolean translateAvailable = true;
 
     private Callbacks callbacks;
     private Screen screen = Screen.SELECT;
     private Focus focus = Focus.SIDEBAR;
-    private int sidebarIndex = 0; // 0=Subtitles, 1=Sync, 2=Settings
+    private int sidebarIndex = 0; // 0=Subtitles, 1=Sync, 2=Translate, 3=Settings
 
     public SubtitlePanel(Context context) {
         super(context);
@@ -69,7 +77,8 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(dp(180), ViewGroup.LayoutParams.MATCH_PARENT);
         row.addView(sidebar, sbLp);
 
-        sidebarItems = new TextView[]{ sidebarItem("Subtitles"), sidebarItem("Sync"), sidebarItem("⚙ Settings") };
+        sidebarItems = new TextView[]{
+                sidebarItem("Subtitles"), sidebarItem("Sync"), sidebarItem("Translate"), sidebarItem("⚙ Settings") };
         for (TextView it : sidebarItems) sidebar.addView(it);
 
         FrameLayout content = new FrameLayout(context);
@@ -84,6 +93,11 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         syncView = new SyncView(context);
         syncView.setListener(this);
         content.addView(syncView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        translateView = new TranslateView(context);
+        translateView.setListener(this);
+        content.addView(translateView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
@@ -100,6 +114,13 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         syncView.setSession(session);
     }
 
+    /** Pushes the current translation state into the Translate screen and sidebar. */
+    public void setTranslateState(boolean available, String reason, String status, ButtonState buttons) {
+        translateAvailable = available;
+        translateView.setState(available, reason, status, buttons);
+        styleSidebar();
+    }
+
     public boolean isOpen() {
         return getVisibility() == VISIBLE;
     }
@@ -108,6 +129,7 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         setVisibility(VISIBLE);
         screen = Screen.SELECT; // subtitle button always lands on the selection screen first
         syncView.reset();
+        translateView.reset();
         showScreen();
         focusContent();
     }
@@ -126,7 +148,12 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
         }
         int keyCode = event.getKeyCode();
         if (focus == Focus.SIDEBAR) return handleSidebarKey(keyCode);
-        return screen == Screen.SELECT ? selector.handleKey(keyCode) : syncView.handleKey(keyCode);
+        switch (screen) {
+            case SELECT: return selector.handleKey(keyCode);
+            case SYNC: return syncView.handleKey(keyCode);
+            case TRANSLATE: return translateView.handleKey(keyCode);
+            default: return false;
+        }
     }
 
     private boolean handleSidebarKey(int keyCode) {
@@ -159,11 +186,8 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
 
     /** Reflects the highlighted sidebar item into the content screen (live preview). */
     private void applySidebar() {
-        if (sidebarIndex == 0) {
-            screen = Screen.SELECT;
-            showScreen();
-        } else if (sidebarIndex == 1) {
-            screen = Screen.SYNC;
+        if (sidebarIndex < SCREENS.length) {
+            screen = SCREENS[sidebarIndex];
             showScreen();
         }
         styleSidebar();
@@ -172,26 +196,27 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
     private void showScreen() {
         selector.setVisibility(screen == Screen.SELECT ? VISIBLE : GONE);
         syncView.setVisibility(screen == Screen.SYNC ? VISIBLE : GONE);
+        translateView.setVisibility(screen == Screen.TRANSLATE ? VISIBLE : GONE);
     }
 
     private void focusSidebar() {
         focus = Focus.SIDEBAR;
-        sidebarIndex = (screen == Screen.SELECT) ? 0 : 1;
+        sidebarIndex = screen.ordinal();
         selector.setFocused(false);
         syncView.setFocused(false);
+        translateView.setFocused(false);
         styleSidebar();
     }
 
     private void focusContent() {
         focus = Focus.CONTENT;
-        if (screen == Screen.SELECT) {
-            if (selector.isEmpty()) { focusSidebar(); return; }
-            selector.setFocused(true);
-            syncView.setFocused(false);
-        } else {
-            syncView.setFocused(true);
-            selector.setFocused(false);
+        if (screen == Screen.SELECT && selector.isEmpty()) {
+            focusSidebar();
+            return;
         }
+        selector.setFocused(screen == Screen.SELECT);
+        syncView.setFocused(screen == Screen.SYNC);
+        translateView.setFocused(screen == Screen.TRANSLATE);
         styleSidebar();
     }
 
@@ -216,16 +241,28 @@ public class SubtitlePanel extends FrameLayout implements SubtitleSelectorView.L
     @Override public void onSeekTo(long p) { if (callbacks != null) callbacks.onSeekTo(p); }
     @Override public void onTogglePlay() { if (callbacks != null) callbacks.onTogglePlay(); }
 
+    // --- TranslateView.Listener ---
+
+    @Override public void onStartTranslate() { if (callbacks != null) callbacks.onStartTranslate(); }
+    @Override public void onCancelTranslate() { if (callbacks != null) callbacks.onCancelTranslate(); }
+    @Override public void onRestoreOriginal() { if (callbacks != null) callbacks.onRestoreOriginal(); }
+
     // --- sidebar rendering ---
 
     private void styleSidebar() {
-        int activeScreen = screen == Screen.SELECT ? 0 : 1;
+        int activeScreen = screen.ordinal();
         for (int i = 0; i < sidebarItems.length; i++) {
             TextView it = sidebarItems[i];
             boolean focused = focus == Focus.SIDEBAR && i == sidebarIndex;
+            // Dimmed but still selectable — see setTranslateState(); a dead item that silently
+            // ignores OK would be worse UX than just explaining why on the screen itself.
+            boolean dimmedUnavailable = i == Screen.TRANSLATE.ordinal() && !translateAvailable;
             if (focused) {
                 it.setTextColor(0xFF000000);
                 it.setBackgroundColor(0xFFFFFFFF);
+            } else if (dimmedUnavailable) {
+                it.setTextColor(0xFF4A5A63);
+                it.setBackgroundColor(Color.TRANSPARENT);
             } else if (i == activeScreen) {
                 it.setTextColor(0xFF4DD0E1);
                 it.setBackgroundColor(0x334DD0E1);

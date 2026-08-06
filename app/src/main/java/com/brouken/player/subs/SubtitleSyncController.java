@@ -57,6 +57,11 @@ public class SubtitleSyncController {
         }
     }
 
+    /** Swaps the cue text in place (incremental translation) without touching the sync state. */
+    public void updateSubtitle(@Nullable SubtitleFile f) {
+        session.updateSubtitle(f);
+    }
+
     /** Stops rendering (e.g. an embedded track was selected — Media3 draws it instead). */
     public void clear() {
         session.clear();

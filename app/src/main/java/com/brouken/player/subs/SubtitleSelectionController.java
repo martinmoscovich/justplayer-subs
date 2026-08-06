@@ -296,7 +296,7 @@ public class SubtitleSelectionController {
     }
 
     @Nullable
-    private String mediaTitle() {
+    String mediaTitle() {
         if (player == null) return null;
         MediaMetadata md = player.getMediaMetadata();
         CharSequence t = md != null ? (md.title != null ? md.title : md.displayTitle) : null;
