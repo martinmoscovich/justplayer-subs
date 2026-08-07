@@ -39,7 +39,9 @@ public class CustomSubtitleController
     private final SubtitleSelectionController selection;
     private final SubtitlePanel panel;
     private final TranslationController translation;
+    private final AutoSyncController autoSync;
     private boolean ticking;
+    @Nullable private Uri mediaUri;
 
     public CustomSubtitleController(Context context, ViewGroup root, ExoPlayer player,
                                     DefaultTrackSelector trackSelector) {
@@ -67,12 +69,21 @@ public class CustomSubtitleController
         ilp.rightMargin = indicatorMargin;
         root.addView(translation.getIndicatorView(), ilp);
 
+        autoSync = new AutoSyncController(context, panel, handler);
+        FrameLayout.LayoutParams alp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.gravity = Gravity.TOP | Gravity.START;
+        alp.topMargin = indicatorMargin;
+        alp.leftMargin = indicatorMargin;
+        root.addView(autoSync.getIndicatorView(), alp);
+
         selection = new SubtitleSelectionController(context, player, trackSelector, this, handler);
     }
 
     public void onMediaSet(@Nullable Uri mediaUri,
                            @Nullable List<MediaItem.SubtitleConfiguration> apiSubs,
                            @Nullable Uri prefsSubtitleUri) {
+        this.mediaUri = mediaUri;
         selection.onMediaSet(mediaUri, apiSubs, prefsSubtitleUri);
         startTicking();
     }
@@ -99,9 +110,11 @@ public class CustomSubtitleController
         ticking = false;
         handler.removeCallbacksAndMessages(null);
         translation.release();
+        autoSync.release();
         selection.release();
         removeFromParent(sync.getOverlayView());
         removeFromParent(translation.getIndicatorView());
+        removeFromParent(autoSync.getIndicatorView());
         removeFromParent(panel);
     }
 
@@ -150,12 +163,17 @@ public class CustomSubtitleController
 
     @Override public void onRestoreOriginal() { translation.restoreOriginal(); }
 
+    @Override public void onStartAutoSync() { autoSync.start(); }
+
+    @Override public void onCancelAutoSync() { autoSync.cancel(); }
+
     // --- SubtitleSelectionController.Listener ---
 
     @Override public void onSubtitleLoaded(SubtitleFile file) {
         sync.setSubtitle(file);
         panel.setSyncSession(sync.getSession());
         translation.setSource(file, selection.mediaTitle());
+        autoSync.setSource(file, mediaUri);
         renderOverlay();
     }
 
@@ -163,6 +181,7 @@ public class CustomSubtitleController
         sync.clear();
         panel.setSyncSession(sync.getSession());
         translation.setSource(null, null);
+        autoSync.setSource(null, mediaUri);
     }
 
     @Override public void onOptionsChanged(List<SubtitleOption> options, @Nullable String selectedId,
@@ -182,6 +201,7 @@ public class CustomSubtitleController
         if (!ticking) return;
         renderOverlay();
         translation.renderIndicator(panel.isOpen());
+        autoSync.renderIndicator(panel.isOpen());
         panel.onTick(currentPositionMs());
         handler.postDelayed(this::tick, POLL_MS);
     }

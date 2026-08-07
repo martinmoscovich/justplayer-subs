@@ -12,6 +12,7 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.leanback.widget.VerticalGridView;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -43,6 +44,8 @@ public class SyncView extends FrameLayout {
         void onOpenMenu();
         /** Done button: close the whole panel. */
         void onRequestClose();
+        void onStartAutoSync();
+        void onCancelAutoSync();
     }
 
     private static final int COLOR_DIM = 0x80FFFFFF;
@@ -52,13 +55,14 @@ public class SyncView extends FrameLayout {
     private static final int FOCUS_BG = 0x33FFFFFF;
     private static final int SEGMENT_LABEL = 0xB0B0BEC5;
 
-    private static final int SEEK_BACK_INDEX = 2;
-    private static final int PLAY_PAUSE_INDEX = 3;
-    private static final int SEEK_FWD_INDEX = 4;
-    private static final int PREV_SEG_INDEX = 1;
-    private static final int NEXT_SEG_INDEX = 5;
+    private static final int AUTO_SYNC_INDEX = 1;
+    private static final int PREV_SEG_INDEX = 2;
+    private static final int SEEK_BACK_INDEX = 3;
+    private static final int PLAY_PAUSE_INDEX = 4;
+    private static final int SEEK_FWD_INDEX = 5;
+    private static final int NEXT_SEG_INDEX = 6;
 
-    private enum Zone { CONTROLS, LIST }
+    private enum Zone { CONTROLS, LIST, REVIEW }
 
     private static final class Btn {
         final String label;
@@ -78,6 +82,7 @@ public class SyncView extends FrameLayout {
 
     private Listener listener;
     private ManualSyncSession session; // engine — the source of truth for cues + sync logic
+    @Nullable private AutoSyncUiState autoSyncState;
     private boolean autoscroll = true;
     private Zone zone = Zone.CONTROLS;
     private int buttonIndex = 0;
@@ -119,6 +124,7 @@ public class SyncView extends FrameLayout {
 
         buttons = new Btn[]{
                 new Btn("Sync line", this::enterListMode),
+                new Btn("Auto-sync", this::toggleAutoSync),
                 new Btn("|« Prev seg", this::seekPrevSegment),
                 new Btn("« 5s", () -> seek(-1)),
                 new Btn("⏸", this::togglePlay),
@@ -166,6 +172,19 @@ public class SyncView extends FrameLayout {
         updateButtons();
     }
 
+    /** Pushes formatted auto-sync state (see {@link AutoSyncController}). A confident result opens Zone.REVIEW. */
+    public void setAutoSyncState(AutoSyncUiState state) {
+        this.autoSyncState = state;
+        buttonViews[AUTO_SYNC_INDEX].setText(state.running ? "Cancel" : "Auto-sync");
+        if (state.hasConfidentResult) {
+            zone = Zone.REVIEW;
+            adapter.setSelectedIndex(-1);
+        }
+        updateButtons();
+        updateHint();
+        updateReadout();
+    }
+
     public void setFocused(boolean f) {
         hasFocus = f;
         updateButtons();
@@ -201,7 +220,11 @@ public class SyncView extends FrameLayout {
     }
 
     public boolean handleKey(int keyCode) {
-        return zone == Zone.LIST ? handleListKey(keyCode) : handleControlsKey(keyCode);
+        switch (zone) {
+            case LIST: return handleListKey(keyCode);
+            case REVIEW: return handleReviewKey(keyCode);
+            default: return handleControlsKey(keyCode);
+        }
     }
 
     // --- CONTROLS zone ---
@@ -348,12 +371,55 @@ public class SyncView extends FrameLayout {
         if (t != ManualSyncSession.NO_TARGET) listener.onSeekTo(t);
     }
 
+    // --- REVIEW zone (auto-sync proposal: accept/reject, never applied silently) ---
+
+    private boolean handleReviewKey(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                acceptAutoSync();
+                return true;
+            case KeyEvent.KEYCODE_BACK:
+                rejectAutoSync();
+                return true;
+            default:
+                return true; // modal: swallow navigation until accept/reject
+        }
+    }
+
+    private void acceptAutoSync() {
+        if (session != null && autoSyncState != null && autoSyncState.hasConfidentResult) {
+            session.applyVadOffset(autoSyncState.offsetSeconds);
+            if (listener != null) listener.onSyncChanged();
+        }
+        exitReviewMode();
+    }
+
+    private void rejectAutoSync() {
+        exitReviewMode(); // discards the proposal — SyncState is untouched
+    }
+
+    private void exitReviewMode() {
+        zone = Zone.CONTROLS;
+        updateButtons();
+        updateHint();
+        updateReadout();
+    }
+
+    private void toggleAutoSync() {
+        if (listener == null) return;
+        if (autoSyncState != null && autoSyncState.running) listener.onCancelAutoSync();
+        else listener.onStartAutoSync();
+    }
+
     // --- rendering ---
 
     private void updateButtons() {
         long p = pos();
         boolean hasCues = session != null && session.hasCues();
         enabled[0] = hasCues;
+        enabled[AUTO_SYNC_INDEX] = autoSyncState == null || autoSyncState.available;
         enabled[PREV_SEG_INDEX] = session != null && session.prevSegmentTarget(p) != ManualSyncSession.NO_TARGET;
         enabled[NEXT_SEG_INDEX] = session != null && session.nextSegmentTarget(p) != ManualSyncSession.NO_TARGET;
 
@@ -379,9 +445,27 @@ public class SyncView extends FrameLayout {
     }
 
     private void updateHint() {
-        hint.setText(zone == Zone.LIST
-                ? "▲ ▼ choose line   ·   ◄ ► nudge   ·   OK: anchor here   ·   Back: cancel"
-                : "◄ ► move   ·   OK: select   ·   'Sync line' to anchor   ·   ◄ menu");
+        if (zone == Zone.REVIEW) {
+            String proposal = autoSyncState != null ? autoSyncState.hint : "";
+            hint.setText(proposal + "   ·   OK: accept   ·   Back: reject");
+            return;
+        }
+        if (zone == Zone.LIST) {
+            hint.setText("▲ ▼ choose line   ·   ◄ ► nudge   ·   OK: anchor here   ·   Back: cancel");
+            return;
+        }
+        if (autoSyncState != null && !autoSyncState.available) {
+            // Unavailable reason ("Load an external subtitle first", "No media source", HLS, …) —
+            // never fail silently, per PLAN.md §8.
+            hint.setText(autoSyncState.unavailableReason != null ? autoSyncState.unavailableReason : "");
+        } else if (autoSyncState != null && autoSyncState.hint != null && !autoSyncState.hint.isEmpty()) {
+            // Covers both RUNNING progress ("Extracting audio… 34%") and terminal messages that
+            // aren't a confident-result proposal ("No confident match", "Cancelled",
+            // "Auto-sync failed: …") — those must reach the user too, not just errors.
+            hint.setText(autoSyncState.hint);
+        } else {
+            hint.setText("◄ ► move   ·   OK: select   ·   'Sync line' to anchor   ·   ◄ menu");
+        }
     }
 
     private void updateReadout() {

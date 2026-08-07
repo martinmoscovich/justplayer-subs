@@ -40,6 +40,8 @@ public class SubtitlePanel extends FrameLayout
         void onStartTranslate();
         void onCancelTranslate();
         void onRestoreOriginal();
+        void onStartAutoSync();
+        void onCancelAutoSync();
     }
 
     private enum Screen { SELECT, SYNC, TRANSLATE }
@@ -119,6 +121,11 @@ public class SubtitlePanel extends FrameLayout
         translateAvailable = available;
         translateView.setState(available, reason, status, buttons);
         styleSidebar();
+    }
+
+    /** Pushes formatted auto-sync state (see {@link AutoSyncController}) into the Sync screen. */
+    public void setAutoSyncState(AutoSyncUiState state) {
+        syncView.setAutoSyncState(state);
     }
 
     public boolean isOpen() {
@@ -246,6 +253,11 @@ public class SubtitlePanel extends FrameLayout
     @Override public void onStartTranslate() { if (callbacks != null) callbacks.onStartTranslate(); }
     @Override public void onCancelTranslate() { if (callbacks != null) callbacks.onCancelTranslate(); }
     @Override public void onRestoreOriginal() { if (callbacks != null) callbacks.onRestoreOriginal(); }
+
+    // --- SyncView.Listener (auto-sync) ---
+
+    @Override public void onStartAutoSync() { if (callbacks != null) callbacks.onStartAutoSync(); }
+    @Override public void onCancelAutoSync() { if (callbacks != null) callbacks.onCancelAutoSync(); }
 
     // --- sidebar rendering ---
 
