@@ -48,14 +48,22 @@ public class AutoSyncController implements AutoSyncSession.Listener {
 
     // From Start keeps a generous window to survive long dialogue-free intros/credits, and searches
     // widely since a fixed 0s start has no prior on the true offset. From Here assumes the user
-    // already heard dialogue at the current position — a much smaller window is enough (faster
-    // extraction, especially over HTTP: MediaExtractorAudioProvider seeks + decodes only the
-    // requested duration) AND a much smaller search range is enough (the user is presumably already
-    // roughly in sync). The two must NOT share maxOffsetSeconds: SubtitleResyncer's evidence gate
-    // (matchedEvents) scales with maxOffsetSeconds — at 120s the bar is ~11 matched cues regardless
-    // of window size, which a 20s window frequently can't supply even for a correct match (confirmed
-    // against real audio, see LESSONS.md). A smaller search range for From Here lowers that bar to
-    // match what a small window can actually provide.
+    // already heard dialogue at the current position — a smaller window is enough (faster extraction,
+    // especially over HTTP: MediaExtractorAudioProvider seeks + decodes only the requested duration)
+    // AND a much smaller search range is enough (the user is presumably already roughly in sync). The
+    // two must NOT share maxOffsetSeconds: SubtitleResyncer's evidence gate (matchedEvents) scales
+    // with maxOffsetSeconds — at 120s the bar is ~11 matched cues regardless of window size, which a
+    // short window frequently can't supply even for a correct match. A smaller search range for From
+    // Here lowers that bar to match what a small window can actually provide.
+    //
+    // 20s was the original From Here window, but it's too small on its own: tested against real audio
+    // (Sintel), the *densest* possible 20s window anywhere in the file supplies at most 5 matched
+    // cues — permanently below the matchedEvents bar (10 at maxOffsetSeconds=20), so From Here could
+    // never succeed there regardless of where the probe landed. 40s was the measured threshold where
+    // the same dense region clears the gate (matched=10). The bar barely moves between
+    // maxOffsetSeconds=20 and =40 (evidence scales with log(candidateLags)), so the fix is a bigger
+    // window at the *same* search range, not a wider search too — see LESSONS.md.
+    //
     // Starting "From Start" at a literal 0s is often the worst sampling position: many episodes open
     // with a recap or cold intro the subtitle file doesn't cover, so the window can contain zero
     // matchable cues for minutes. Starting at a fraction of the media duration instead lands inside
@@ -63,7 +71,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     private static final double AUTO_START_FRACTION = 0.3;
     private static final double FROM_START_ANALYSIS_SECONDS = 120.0;
     private static final double FROM_START_MAX_OFFSET_SECONDS = 120.0;
-    private static final double FROM_HERE_ANALYSIS_SECONDS = 20.0;
+    private static final double FROM_HERE_ANALYSIS_SECONDS = 40.0;
     private static final double FROM_HERE_MAX_OFFSET_SECONDS = 20.0;
     private static final int BIN_MS = 100;
 
