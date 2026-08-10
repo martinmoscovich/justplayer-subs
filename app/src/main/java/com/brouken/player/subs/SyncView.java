@@ -44,7 +44,7 @@ public class SyncView extends FrameLayout {
         void onOpenMenu();
         /** Done button: close the whole panel. */
         void onRequestClose();
-        void onStartAutoSync();
+        void onStartAutoSync(boolean fromHere);
         void onCancelAutoSync();
     }
 
@@ -62,7 +62,9 @@ public class SyncView extends FrameLayout {
     private static final int SEEK_FWD_INDEX = 5;
     private static final int NEXT_SEG_INDEX = 6;
 
-    private enum Zone { CONTROLS, LIST, REVIEW }
+    private enum Zone { CONTROLS, LIST, REVIEW, AUTO_SYNC_MENU }
+
+    private static final String[] AUTO_SYNC_MENU_OPTIONS = { "From Start", "From Here" };
 
     private static final class Btn {
         final String label;
@@ -86,6 +88,7 @@ public class SyncView extends FrameLayout {
     private boolean autoscroll = true;
     private Zone zone = Zone.CONTROLS;
     private int buttonIndex = 0;
+    private int autoSyncMenuIndex = 0; // 0 = "From Start", 1 = "From Here"
     private boolean lastPlaying = true;
     private boolean hasFocus = true;
 
@@ -223,6 +226,7 @@ public class SyncView extends FrameLayout {
         switch (zone) {
             case LIST: return handleListKey(keyCode);
             case REVIEW: return handleReviewKey(keyCode);
+            case AUTO_SYNC_MENU: return handleAutoSyncMenuKey(keyCode);
             default: return handleControlsKey(keyCode);
         }
     }
@@ -409,8 +413,45 @@ public class SyncView extends FrameLayout {
 
     private void toggleAutoSync() {
         if (listener == null) return;
-        if (autoSyncState != null && autoSyncState.running) listener.onCancelAutoSync();
-        else listener.onStartAutoSync();
+        if (autoSyncState != null && autoSyncState.running) {
+            listener.onCancelAutoSync();
+        } else {
+            autoSyncMenuIndex = 0;
+            zone = Zone.AUTO_SYNC_MENU;
+            updateButtons();
+            updateHint();
+        }
+    }
+
+    // --- AUTO_SYNC_MENU zone: "From Start" / "From Here" choice, modal like REVIEW ---
+
+    private boolean handleAutoSyncMenuKey(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                autoSyncMenuIndex = 1 - autoSyncMenuIndex;
+                updateHint();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                exitAutoSyncMenu();
+                if (listener != null) listener.onStartAutoSync(autoSyncMenuIndex == 1);
+                return true;
+            case KeyEvent.KEYCODE_BACK:
+                exitAutoSyncMenu();
+                return true;
+            default:
+                return true; // modal: swallow navigation until a choice or Back
+        }
+    }
+
+    private void exitAutoSyncMenu() {
+        zone = Zone.CONTROLS;
+        updateButtons();
+        updateHint();
     }
 
     // --- rendering ---
@@ -445,6 +486,16 @@ public class SyncView extends FrameLayout {
     }
 
     private void updateHint() {
+        if (zone == Zone.AUTO_SYNC_MENU) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < AUTO_SYNC_MENU_OPTIONS.length; i++) {
+                if (i > 0) sb.append("    ");
+                sb.append(i == autoSyncMenuIndex ? "▸ " : "  ").append(AUTO_SYNC_MENU_OPTIONS[i]);
+            }
+            sb.append("   ·   OK: start   ·   Back: cancel");
+            hint.setText(sb.toString());
+            return;
+        }
         if (zone == Zone.REVIEW) {
             String proposal = autoSyncState != null ? autoSyncState.hint : "";
             hint.setText(proposal + "   ·   OK: accept   ·   Back: reject");

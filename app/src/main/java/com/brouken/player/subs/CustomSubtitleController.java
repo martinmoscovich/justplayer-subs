@@ -163,7 +163,10 @@ public class CustomSubtitleController
 
     @Override public void onRestoreOriginal() { translation.restoreOriginal(); }
 
-    @Override public void onStartAutoSync() { autoSync.start(); }
+    @Override public void onStartAutoSync(boolean fromHere) {
+        if (fromHere) autoSync.startFromHere(player != null ? player.getCurrentPosition() : 0L);
+        else autoSync.startFromBeginning(player != null ? player.getDuration() : 0L);
+    }
 
     @Override public void onCancelAutoSync() { autoSync.cancel(); }
 

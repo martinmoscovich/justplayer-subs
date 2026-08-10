@@ -46,6 +46,27 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     private static final String TAG = "AutoSyncController";
     private static final long TERMINAL_FLASH_MS = 3000;
 
+    // From Start keeps a generous window to survive long dialogue-free intros/credits, and searches
+    // widely since a fixed 0s start has no prior on the true offset. From Here assumes the user
+    // already heard dialogue at the current position — a much smaller window is enough (faster
+    // extraction, especially over HTTP: MediaExtractorAudioProvider seeks + decodes only the
+    // requested duration) AND a much smaller search range is enough (the user is presumably already
+    // roughly in sync). The two must NOT share maxOffsetSeconds: SubtitleResyncer's evidence gate
+    // (matchedEvents) scales with maxOffsetSeconds — at 120s the bar is ~11 matched cues regardless
+    // of window size, which a 20s window frequently can't supply even for a correct match (confirmed
+    // against real audio, see LESSONS.md). A smaller search range for From Here lowers that bar to
+    // match what a small window can actually provide.
+    // Starting "From Start" at a literal 0s is often the worst sampling position: many episodes open
+    // with a recap or cold intro the subtitle file doesn't cover, so the window can contain zero
+    // matchable cues for minutes. Starting at a fraction of the media duration instead lands inside
+    // the body of the content far more often. 0.0 reproduces the old literal-0s behavior exactly.
+    private static final double AUTO_START_FRACTION = 0.3;
+    private static final double FROM_START_ANALYSIS_SECONDS = 120.0;
+    private static final double FROM_START_MAX_OFFSET_SECONDS = 120.0;
+    private static final double FROM_HERE_ANALYSIS_SECONDS = 20.0;
+    private static final double FROM_HERE_MAX_OFFSET_SECONDS = 20.0;
+    private static final int BIN_MS = 100;
+
     private final Context context;
     private final SubtitlePanel panel;
     private final Handler mainHandler;
@@ -139,11 +160,27 @@ public class AutoSyncController implements AutoSyncSession.Listener {
         pushState();
     }
 
-    public void start() {
+    /**
+     * From Start: extraction begins at {@link #AUTO_START_FRACTION} of the media duration (0.0 =
+     * literal file start), with a generous window and search range — long intros/credits, no prior
+     * on the true offset. {@code durationMs <= 0} (unknown, e.g. not yet loaded) falls back to 0s.
+     */
+    public void startFromBeginning(long durationMs) {
+        double startSeconds = durationMs > 0 ? (durationMs / 1000.0) * AUTO_START_FRACTION : 0.0;
+        start(startSeconds, FROM_START_ANALYSIS_SECONDS, FROM_START_MAX_OFFSET_SECONDS);
+    }
+
+    /** From Here: extraction begins at the current playback position with a much smaller window and
+     *  search range (the user is presumably already roughly in sync). */
+    public void startFromHere(long positionMs) {
+        start(positionMs / 1000.0, FROM_HERE_ANALYSIS_SECONDS, FROM_HERE_MAX_OFFSET_SECONDS);
+    }
+
+    private void start(double startSeconds, double analysisSeconds, double maxOffsetSeconds) {
         if (!canStart()) return;
         indicatorTerminalText = null;
         try {
-            ensureSession().start();
+            ensureSession().start(startSeconds, analysisSeconds, maxOffsetSeconds, BIN_MS);
         } catch (Throwable t) {
             // Most likely SileroVadEngine's ONNX init on first start() — never fail silently.
             Log.e(TAG, "start: failed to initialize auto-sync engine", t);
@@ -238,7 +275,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
             case DONE:
                 ResyncResult result = p.getResult();
                 return result != null
-                        ? AutoSyncUiState.confidentResult(result.getOffsetSeconds(), result.getConfidence(), formatDone(result))
+                        ? AutoSyncUiState.confidentResult(result.getOffsetSeconds(), result.getUniqueness(), formatDone(result))
                         : AutoSyncUiState.terminal("No confident match");
             case CANCELLED:
                 return AutoSyncUiState.terminal("Cancelled");
@@ -265,7 +302,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     }
 
     private static String formatDone(ResyncResult result) {
-        return String.format(Locale.US, "Proposed shift %+.1fs (confidence %.1f)",
-                result.getOffsetSeconds(), result.getConfidence());
+        return String.format(Locale.US, "Proposed shift %+.1fs (uniqueness %.1f)",
+                result.getOffsetSeconds(), result.getUniqueness());
     }
 }
