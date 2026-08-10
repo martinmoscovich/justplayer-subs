@@ -67,6 +67,16 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     private static final double FROM_HERE_MAX_OFFSET_SECONDS = 20.0;
     private static final int BIN_MS = 100;
 
+    // Optional second probe (AutoSyncSession only runs it if the first finds nothing — no extra cost
+    // in the common case): a single bad sample shouldn't be the whole story, and picking one fixed
+    // window is inherently a gamble on local dialogue density. From Start's second probe samples a
+    // different third of the media so the two probes aren't both gambling on the same region. From
+    // Here's second probe jumps forward past its own (small, 20s) window rather than to a fixed
+    // fraction — the user's chosen position is already the best available sample, so the fallback
+    // should stay close to it, just far enough to see fresh dialogue if the first 20s were sparse.
+    private static final double AUTO_SECOND_PROBE_FRACTION = 0.65;
+    private static final double FROM_HERE_SECOND_PROBE_JUMP_SECONDS = 60.0;
+
     private final Context context;
     private final SubtitlePanel panel;
     private final Handler mainHandler;
@@ -163,24 +173,37 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     /**
      * From Start: extraction begins at {@link #AUTO_START_FRACTION} of the media duration (0.0 =
      * literal file start), with a generous window and search range — long intros/credits, no prior
-     * on the true offset. {@code durationMs <= 0} (unknown, e.g. not yet loaded) falls back to 0s.
+     * on the true offset. If the first probe finds nothing, a second at
+     * {@link #AUTO_SECOND_PROBE_FRACTION} is tried. {@code durationMs <= 0} (unknown, e.g. not yet
+     * loaded) falls back to 0s with no second probe (nothing to compute a second fraction from).
      */
     public void startFromBeginning(long durationMs) {
-        double startSeconds = durationMs > 0 ? (durationMs / 1000.0) * AUTO_START_FRACTION : 0.0;
-        start(startSeconds, FROM_START_ANALYSIS_SECONDS, FROM_START_MAX_OFFSET_SECONDS);
+        if (durationMs > 0) {
+            double durationSeconds = durationMs / 1000.0;
+            start(durationSeconds * AUTO_START_FRACTION, FROM_START_ANALYSIS_SECONDS,
+                    FROM_START_MAX_OFFSET_SECONDS, durationSeconds * AUTO_SECOND_PROBE_FRACTION);
+        } else {
+            start(0.0, FROM_START_ANALYSIS_SECONDS, FROM_START_MAX_OFFSET_SECONDS, null);
+        }
     }
 
-    /** From Here: extraction begins at the current playback position with a much smaller window and
-     *  search range (the user is presumably already roughly in sync). */
+    /**
+     * From Here: extraction begins at the current playback position with a much smaller window and
+     * search range (the user is presumably already roughly in sync). If the first probe finds
+     * nothing, a second {@link #FROM_HERE_SECOND_PROBE_JUMP_SECONDS} further ahead is tried.
+     */
     public void startFromHere(long positionMs) {
-        start(positionMs / 1000.0, FROM_HERE_ANALYSIS_SECONDS, FROM_HERE_MAX_OFFSET_SECONDS);
+        double startSeconds = positionMs / 1000.0;
+        start(startSeconds, FROM_HERE_ANALYSIS_SECONDS, FROM_HERE_MAX_OFFSET_SECONDS,
+                startSeconds + FROM_HERE_SECOND_PROBE_JUMP_SECONDS);
     }
 
-    private void start(double startSeconds, double analysisSeconds, double maxOffsetSeconds) {
+    private void start(double startSeconds, double analysisSeconds, double maxOffsetSeconds,
+                        @Nullable Double secondProbeStartSeconds) {
         if (!canStart()) return;
         indicatorTerminalText = null;
         try {
-            ensureSession().start(startSeconds, analysisSeconds, maxOffsetSeconds, BIN_MS);
+            ensureSession().start(startSeconds, analysisSeconds, maxOffsetSeconds, BIN_MS, secondProbeStartSeconds);
         } catch (Throwable t) {
             // Most likely SileroVadEngine's ONNX init on first start() — never fail silently.
             Log.e(TAG, "start: failed to initialize auto-sync engine", t);
