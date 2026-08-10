@@ -16,8 +16,14 @@ import java.util.Locale;
 import java.util.concurrent.ThreadFactory;
 
 import subtitleengine.core.model.SubtitleFile;
+import subtitleengine.resync.AutoSyncEvidencePolicy;
+import subtitleengine.resync.AutoSyncProbeLocator;
 import subtitleengine.resync.AutoSyncProgress;
 import subtitleengine.resync.AutoSyncSession;
+import subtitleengine.resync.DialogueDensityProbeLocator;
+import subtitleengine.resync.DialoguePacingEvidencePolicy;
+import subtitleengine.resync.FractionalProbeLocator;
+import subtitleengine.resync.ProbePlacement;
 import subtitleengine.vad.ResyncResult;
 import subtitleengine.vad.SileroVadEngine;
 import subtitleengine.vad.SubtitleResyncer;
@@ -64,11 +70,8 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     // maxOffsetSeconds=20 and =40 (evidence scales with log(candidateLags)), so the fix is a bigger
     // window at the *same* search range, not a wider search too — see LESSONS.md.
     //
-    // Starting "From Start" at a literal 0s is often the worst sampling position: many episodes open
-    // with a recap or cold intro the subtitle file doesn't cover, so the window can contain zero
-    // matchable cues for minutes. Starting at a fraction of the media duration instead lands inside
-    // the body of the content far more often. 0.0 reproduces the old literal-0s behavior exactly.
-    private static final double AUTO_START_FRACTION = 0.3;
+    // Where to place the "From Start" probe(s) is now engine policy (subtitleengine.resync.
+    // AutoSyncProbeLocator) instead of arithmetic inline here — see probeLocator below.
     private static final double FROM_START_ANALYSIS_SECONDS = 120.0;
     private static final double FROM_START_MAX_OFFSET_SECONDS = 120.0;
     private static final double FROM_HERE_ANALYSIS_SECONDS = 40.0;
@@ -76,19 +79,27 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     private static final int BIN_MS = 100;
 
     // Optional second probe (AutoSyncSession only runs it if the first finds nothing — no extra cost
-    // in the common case): a single bad sample shouldn't be the whole story, and picking one fixed
-    // window is inherently a gamble on local dialogue density. From Start's second probe samples a
-    // different third of the media so the two probes aren't both gambling on the same region. From
-    // Here's second probe jumps forward past its own (small, 20s) window rather than to a fixed
-    // fraction — the user's chosen position is already the best available sample, so the fallback
-    // should stay close to it, just far enough to see fresh dialogue if the first 20s were sparse.
-    private static final double AUTO_SECOND_PROBE_FRACTION = 0.65;
+    // in the common case): a single bad sample shouldn't be the whole story. From Start's second probe
+    // is the locator's job (see probeLocator). From Here's second probe jumps forward past its own
+    // (small, 20s) window rather than to a fixed fraction — the user's chosen position is already the
+    // best available sample, so the fallback should stay close to it, just far enough to see fresh
+    // dialogue if the first 20s were sparse.
     private static final double FROM_HERE_SECOND_PROBE_JUMP_SECONDS = 60.0;
 
     private final Context context;
     private final SubtitlePanel panel;
     private final Handler mainHandler;
     private final TextView indicator;
+
+    // From Start placement: density-based (subtitleengine.resync.DialogueDensityProbeLocator) with the
+    // old blind-fraction heuristic (FractionalProbeLocator) as fallback for subtitles with no usable
+    // dialogue cues to measure density from. Stateless — safe to share across runs.
+    private final AutoSyncProbeLocator probeLocator = new DialogueDensityProbeLocator(new FractionalProbeLocator());
+
+    // From Start evidence gate: discounts matchedEvents for sparse/continuous content (see
+    // DialoguePacingEvidencePolicy's javadoc for the real-audio measurement behind this) — standard
+    // TV/movie pacing, the common case, is left exactly as before. Stateless — safe to share across runs.
+    private final AutoSyncEvidencePolicy evidencePolicy = new DialoguePacingEvidencePolicy();
 
     @Nullable private SubtitleResyncer resyncer; // lazy — ONNX init isn't free; kept alive until release()
     @Nullable private AutoSyncSession session;
@@ -179,19 +190,21 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     }
 
     /**
-     * From Start: extraction begins at {@link #AUTO_START_FRACTION} of the media duration (0.0 =
-     * literal file start), with a generous window and search range — long intros/credits, no prior
-     * on the true offset. If the first probe finds nothing, a second at
-     * {@link #AUTO_SECOND_PROBE_FRACTION} is tried. {@code durationMs <= 0} (unknown, e.g. not yet
-     * loaded) falls back to 0s with no second probe (nothing to compute a second fraction from).
+     * From Start: extraction begins wherever {@link #probeLocator} places it — the subtitle's
+     * densest dialogue region by default, with a generous window and search range (long
+     * intros/credits, no prior on the true offset). If the first probe finds nothing, a second probe
+     * from the locator's placement is tried. {@code durationMs <= 0} (unknown, e.g. not yet loaded)
+     * falls back to 0s with no second probe — same as the locator's own unknown-duration behavior.
      */
     public void startFromBeginning(long durationMs) {
         if (durationMs > 0) {
             double durationSeconds = durationMs / 1000.0;
-            start(durationSeconds * AUTO_START_FRACTION, FROM_START_ANALYSIS_SECONDS,
-                    FROM_START_MAX_OFFSET_SECONDS, durationSeconds * AUTO_SECOND_PROBE_FRACTION);
+            ProbePlacement placement = probeLocator.locate(subtitle, durationSeconds, FROM_START_ANALYSIS_SECONDS);
+            int slack = evidencePolicy.matchedEventsSlack(subtitle, durationSeconds);
+            start(placement.startSeconds(), FROM_START_ANALYSIS_SECONDS,
+                    FROM_START_MAX_OFFSET_SECONDS, placement.secondProbeStartSeconds(), slack);
         } else {
-            start(0.0, FROM_START_ANALYSIS_SECONDS, FROM_START_MAX_OFFSET_SECONDS, null);
+            start(0.0, FROM_START_ANALYSIS_SECONDS, FROM_START_MAX_OFFSET_SECONDS, null, 0);
         }
     }
 
@@ -208,10 +221,16 @@ public class AutoSyncController implements AutoSyncSession.Listener {
 
     private void start(double startSeconds, double analysisSeconds, double maxOffsetSeconds,
                         @Nullable Double secondProbeStartSeconds) {
+        start(startSeconds, analysisSeconds, maxOffsetSeconds, secondProbeStartSeconds, 0);
+    }
+
+    private void start(double startSeconds, double analysisSeconds, double maxOffsetSeconds,
+                        @Nullable Double secondProbeStartSeconds, int matchedEventsSlack) {
         if (!canStart()) return;
         indicatorTerminalText = null;
         try {
-            ensureSession().start(startSeconds, analysisSeconds, maxOffsetSeconds, BIN_MS, secondProbeStartSeconds);
+            ensureSession().start(startSeconds, analysisSeconds, maxOffsetSeconds, BIN_MS, secondProbeStartSeconds,
+                    matchedEventsSlack);
         } catch (Throwable t) {
             // Most likely SileroVadEngine's ONNX init on first start() — never fail silently.
             Log.e(TAG, "start: failed to initialize auto-sync engine", t);
