@@ -137,12 +137,16 @@ public class TranslationController implements TranslationSession.Listener {
         pushState();
     }
 
-    public void start() {
+    /**
+     * @param positionMs current playback position — entries at/after it are prioritized so the
+     *                   user can keep watching without gaps as soon as possible.
+     */
+    public void start(long positionMs) {
         if (!canTranslate()) return;
         toastedForRun = false;
         lastProgress = null;
         indicatorTerminalText = null;
-        session.start(targetLanguage());
+        session.start(targetLanguage(), positionMs);
         pushState();
     }
 

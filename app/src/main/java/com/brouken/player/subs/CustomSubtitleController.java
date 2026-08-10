@@ -157,7 +157,7 @@ public class CustomSubtitleController
         context.startActivity(i);
     }
 
-    @Override public void onStartTranslate() { translation.start(); }
+    @Override public void onStartTranslate() { translation.start(currentPositionMs()); }
 
     @Override public void onCancelTranslate() { translation.cancel(); }
 
