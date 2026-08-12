@@ -62,4 +62,5 @@
     <string name="skip_recap">Skip recap</string>
     <string name="skip_ending">Skip ending</string>
     <string name="skip_generic">Skip</string>
+    <string name="subtitle_provider_search_failed">Subtitle search failed. Check the connection and the OpenSubtitles API key.</string>
 </resources>

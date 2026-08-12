@@ -5,8 +5,11 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Handler;
 import android.text.TextUtils;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+
+import com.brouken.player.R;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
@@ -111,8 +114,12 @@ public class SubtitleSelectionController {
     }
 
     public boolean hasOptions() {
+        // `providerSearched` on purpose: once a provider search has been attempted, the panel stays
+        // reachable even if it found nothing or failed. Otherwise a media file with no sidecar and
+        // no embedded track locks the user out of the very screen that searches for subtitles — and
+        // out of the message explaining why there are none.
         return !externalOptions.isEmpty() || !embeddedOptions.isEmpty()
-                || !providerOptions.isEmpty() || loadingMore;
+                || !providerOptions.isEmpty() || loadingMore || providerSearched;
     }
 
     public void release() {
@@ -275,7 +282,13 @@ public class SubtitleSelectionController {
     private void onProviderError(Exception e) {
         loadingMore = false;
         refresh();
-        android.util.Log.w(TAG, "OpenSubtitles search failed: " + e.getMessage());
+        // Throwable, not e.getMessage(): the message alone drops the cause and the stack trace, and
+        // this failure is otherwise invisible — the list just renders as empty.
+        android.util.Log.w(TAG, "OpenSubtitles search failed", e);
+        // Called on the main thread (posted from the search worker), so the Toast is safe here.
+        Toast.makeText(context,
+                context.getString(R.string.subtitle_provider_search_failed),
+                Toast.LENGTH_LONG).show();
     }
 
     private void loadProvider(SubtitleOption opt) {
