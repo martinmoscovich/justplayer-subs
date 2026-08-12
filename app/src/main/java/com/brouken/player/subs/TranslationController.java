@@ -17,6 +17,7 @@ import java.util.Locale;
 
 import okhttp3.OkHttpClient;
 import subtitleengine.core.model.SubtitleFile;
+import subtitleengine.translation.ChunkProgress;
 import subtitleengine.translation.GeminiClient;
 import subtitleengine.translation.OpenRouterClient;
 import subtitleengine.translation.SubtitleTranslator;
@@ -288,6 +289,7 @@ public class TranslationController implements TranslationSession.Listener {
                 if (p.getFailedChunks() > 0) running.append(" · ").append(p.getFailedChunks()).append(" failed");
                 if (p.getReadyUntilMs() > 0) running.append(" · ready up to ").append(formatDuration(p.getReadyUntilMs()));
                 running.append(formatCostSoFar(p));
+                appendActiveChunks(running, p);
                 return running.toString();
             case DONE:
                 return formatDone(p);
@@ -299,6 +301,25 @@ public class TranslationController implements TranslationSession.Listener {
             case IDLE:
             default:
                 return "";
+        }
+    }
+
+    /**
+     * One line per chunk currently in flight, with the retries it has already cost. Panel only: the
+     * overlay indicator sits over the video and has to stay a single line.
+     *
+     * <p>Lines are replaced as chunks finish and new ones start, so the block always shows what is
+     * being worked on right now rather than a growing history.
+     */
+    private static void appendActiveChunks(StringBuilder sb, TranslationProgress p) {
+        List<ChunkProgress> active = p.getActiveChunks();
+        if (active == null || active.isEmpty()) return;
+        for (ChunkProgress c : active) {
+            sb.append("\n   chunk ").append(c.getIndex())
+                    .append(" · lines ").append(c.getFirstEntry()).append("-").append(c.getLastEntry());
+            if (c.getRetries() > 0) {
+                sb.append(" · retry ").append(c.getRetries());
+            }
         }
     }
 
