@@ -309,7 +309,17 @@ public class TranslationController implements TranslationSession.Listener {
      */
     private static String formatCostSoFar(@Nullable TranslationProgress p) {
         if (p == null || p.getStats() == null || p.getStats().getCostUsd() == null) return "";
-        return " · $" + String.format(Locale.US, "%.4f", p.getStats().getCostUsd());
+        return " · " + formatCost(p.getStats().getCostUsd());
+    }
+
+    /**
+     * Money below a dime reads as cents: a running total spends most of its life under $0.10, and
+     * "$0.0123" is harder to compare at a glance than "1.23¢".
+     */
+    private static String formatCost(double costUsd) {
+        return costUsd < 0.10
+                ? String.format(Locale.US, "%.2f¢", costUsd * 100)
+                : String.format(Locale.US, "$%.2f", costUsd);
     }
 
     private static String formatDone(@Nullable TranslationProgress p) {
@@ -320,7 +330,7 @@ public class TranslationController implements TranslationSession.Listener {
                 .append(stats.getElapsedMs() / 1000).append("s · ")
                 .append(String.format(Locale.US, "%,d", stats.getTotalTokens())).append(" tokens");
         if (stats.getCostUsd() != null) {
-            sb.append(" · $").append(String.format(Locale.US, "%.4f", stats.getCostUsd()));
+            sb.append(" · ").append(formatCost(stats.getCostUsd()));
         }
         if (p.getUntranslatedEntries() > 0) {
             sb.append(" — ").append(p.getUntranslatedEntries()).append(" lines kept in the original language");

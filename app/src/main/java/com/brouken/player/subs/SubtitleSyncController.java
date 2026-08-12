@@ -2,6 +2,7 @@ package com.brouken.player.subs;
 
 import android.content.Context;
 import android.graphics.Color;
+import android.text.Html;
 import android.text.Layout;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -26,6 +27,8 @@ public class SubtitleSyncController {
     private final TextView overlay;
     private final ManualSyncSession session;
     private boolean active;
+    /** Raw cue text of the last render; compared against so styling runs only when the cue changes. */
+    private String lastRenderedText = "";
 
     public SubtitleSyncController(Context context) {
         session = new ManualSyncSession(SubtitleSettings.syncSettings(context));
@@ -50,6 +53,20 @@ public class SubtitleSyncController {
         }
     }
 
+    /**
+     * Renders inline subtitle markup (&lt;i&gt;, &lt;b&gt;, &lt;font color&gt;…) as actual styling
+     * instead of showing the tags as literal text. Plain text passes through unchanged, so this is
+     * safe to apply to every cue.
+     *
+     * <p>Line breaks are converted first: HTML collapses newlines, so a two-line cue would otherwise
+     * render as one long line.
+     */
+    private static CharSequence styled(String text) {
+        if (text.indexOf('<') < 0) return text; // nothing to parse — skip the cost and any surprises
+        String html = text.replace("\n", "<br>");
+        return Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY);
+    }
+
     /** The overlay view; the coordinator adds it to the player view hierarchy. */
     public View getOverlayView() {
         return overlay;
@@ -70,6 +87,7 @@ public class SubtitleSyncController {
         active = f != null;
         if (!active) {
             overlay.setText("");
+            lastRenderedText = "";
             overlay.setVisibility(View.GONE);
         }
     }
@@ -95,6 +113,9 @@ public class SubtitleSyncController {
         }
         if (overlay.getVisibility() != View.VISIBLE) overlay.setVisibility(View.VISIBLE);
         String text = session.activeCueText(positionMs);
-        if (!text.contentEquals(overlay.getText())) overlay.setText(text);
+        if (!text.contentEquals(lastRenderedText)) {
+            lastRenderedText = text;
+            overlay.setText(styled(text));
+        }
     }
 }
