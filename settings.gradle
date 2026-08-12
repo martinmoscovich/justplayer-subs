@@ -3,9 +3,11 @@ plugins {
 }
 include ':app', ':doubletapplayerview', 'android-file-chooser'
 
-// Subtitle engine lives as a sibling of the fork (player/subtitle-engine-java), included here as a
-// Gradle module so the app can depend on it. Pure JVM, no Android deps.
-include ':subtitle-engine-java'
-project(':subtitle-engine-java').projectDir = new File(settingsDir, '../subtitle-engine-java')
+// Subtitle engine: its own repository (github.com/martinmoscovich/subtitle-engine), checked out as a
+// sibling of this fork and included here as a Gradle module. Pure JVM, no Android deps. Gradle
+// ignores the engine's own settings.gradle.kts when it is included this way, so the engine keeps
+// building standalone from its repo. Run bootstrap.bat in the workspace to lay out the siblings.
+include ':subtitle-engine'
+project(':subtitle-engine').projectDir = new File(settingsDir, '../subtitle-engine')
 
 rootProject.name = "Player"
