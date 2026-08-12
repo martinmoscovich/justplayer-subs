@@ -75,6 +75,7 @@ import androidx.media3.common.TrackGroup;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.Tracks;
+import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlaybackException;
@@ -94,6 +95,9 @@ import androidx.media3.ui.PlayerControlView;
 import androidx.media3.ui.PlayerView;
 import androidx.media3.ui.SubtitleView;
 
+import com.brouken.player.skip.SkipSegment;
+import com.brouken.player.skip.SkipSegmentController;
+import com.brouken.player.skip.SkipSegmentParser;
 import com.brouken.player.subs.CustomSubtitleController;
 import androidx.media3.ui.TimeBar;
 
@@ -107,8 +111,10 @@ import java.io.File;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
@@ -125,6 +131,7 @@ public class PlayerActivity extends Activity {
     public CustomPlayerView playerView;
     public static ExoPlayer player;
     public CustomSubtitleController customSubtitles;
+    public SkipSegmentController skipSegments;
     private YouTubeOverlay youTubeOverlay;
 
     private Object mPictureInPictureParamsBuilder;
@@ -200,9 +207,13 @@ public class PlayerActivity extends Activity {
     static final String API_SUBS_NAME = "subs.name";
     static final String API_TITLE = "title";
     static final String API_END_BY = "end_by";
+    static final String API_HEADERS = "headers";
+    static final String API_SKIP_SEGMENTS = "skip_segments";
     boolean apiAccess;
     boolean apiAccessPartial;
     String apiTitle;
+    Map<String, String> apiHeaders = new LinkedHashMap<>();
+    List<SkipSegment> apiSkipSegments = new ArrayList<>();
     List<MediaItem.SubtitleConfiguration> apiSubs = new ArrayList<>();
     boolean intentReturnResult;
     boolean playbackFinished;
@@ -271,52 +282,7 @@ public class PlayerActivity extends Activity {
             if (SubtitleUtils.isSubtitle(uri, type)) {
                 handleSubtitles(uri);
             } else {
-                Bundle bundle = launchIntent.getExtras();
-                if (bundle != null) {
-                    apiAccess = bundle.containsKey(API_POSITION) || bundle.containsKey(API_RETURN_RESULT)
-                            || bundle.containsKey(API_SUBS) || bundle.containsKey(API_SUBS_ENABLE);
-                    if (apiAccess) {
-                        mPrefs.setPersistent(false);
-                    } else if (bundle.containsKey(API_TITLE)) {
-                        apiAccessPartial = true;
-                    }
-                    apiTitle = bundle.getString(API_TITLE);
-                }
-
-                mPrefs.updateMedia(this, uri, type);
-
-                if (bundle != null) {
-                    Uri defaultSub = null;
-                    Parcelable[] subsEnable = bundle.getParcelableArray(API_SUBS_ENABLE);
-                    if (subsEnable != null && subsEnable.length > 0) {
-                        defaultSub = (Uri) subsEnable[0];
-                    }
-
-                    Parcelable[] subs = bundle.getParcelableArray(API_SUBS);
-                    String[] subsName = bundle.getStringArray(API_SUBS_NAME);
-                    if (subs != null && subs.length > 0) {
-                        for (int i = 0; i < subs.length; i++) {
-                            Uri sub = (Uri) subs[i];
-                            String name = null;
-                            if (subsName != null && subsName.length > i) {
-                                name = subsName[i];
-                            }
-                            apiSubs.add(SubtitleUtils.buildSubtitle(this, sub, name, sub.equals(defaultSub)));
-                        }
-                    }
-                }
-
-                if (apiSubs.isEmpty()) {
-                    searchSubtitles();
-                }
-
-                if (bundle != null) {
-                    intentReturnResult = bundle.getBoolean(API_RETURN_RESULT);
-
-                    if (bundle.containsKey(API_POSITION)) {
-                        mPrefs.updatePosition((long) bundle.getInt(API_POSITION));
-                    }
-                }
+                handleMediaIntent(uri, type, launchIntent.getExtras());
             }
             focusPlay = true;
         }
@@ -778,18 +744,18 @@ public class PlayerActivity extends Activity {
         if (intentReturnResult) {
             Intent intent = new Intent("com.mxtech.intent.result.VIEW");
             intent.putExtra(API_END_BY, playbackFinished ? "playback_completion" : "user");
-            if (!playbackFinished) {
-                if (player != null) {
-                    long duration = player.getDuration();
-                    if (duration != C.TIME_UNSET) {
-                        intent.putExtra(API_DURATION, (int) player.getDuration());
-                    }
-                    if (player.isCurrentMediaItemSeekable()) {
-                        if (mPrefs.persistentMode) {
-                            intent.putExtra(API_POSITION, (int) mPrefs.nonPersitentPosition);
-                        } else {
-                            intent.putExtra(API_POSITION, (int) player.getCurrentPosition());
-                        }
+            // Reported on completion too: a launcher that only looks at position/duration (and
+            // ignores end_by) would otherwise record the playback as never watched.
+            if (player != null) {
+                long duration = player.getDuration();
+                if (duration != C.TIME_UNSET) {
+                    intent.putExtra(API_DURATION, (int) duration);
+                }
+                if (player.isCurrentMediaItemSeekable()) {
+                    if (mPrefs.persistentMode) {
+                        intent.putExtra(API_POSITION, (int) mPrefs.nonPersitentPosition);
+                    } else {
+                        intent.putExtra(API_POSITION, (int) player.getCurrentPosition());
                     }
                 }
             }
@@ -812,8 +778,8 @@ public class PlayerActivity extends Activity {
                 if (SubtitleUtils.isSubtitle(uri, type)) {
                     handleSubtitles(uri);
                 } else {
-                    mPrefs.updateMedia(this, uri, type);
-                    searchSubtitles();
+                    resetApiAccess();
+                    handleMediaIntent(uri, type, intent.getExtras());
                 }
                 focusPlay = true;
                 initializePlayer();
@@ -1077,8 +1043,94 @@ public class PlayerActivity extends Activity {
         apiAccess = false;
         apiAccessPartial = false;
         apiTitle = null;
+        apiHeaders.clear();
+        apiSkipSegments.clear();
         apiSubs.clear();
+        // Otherwise a later exit would report progress for media the launcher never asked for.
+        intentReturnResult = false;
         mPrefs.setPersistent(true);
+    }
+
+    /**
+     * Applies a media ACTION_VIEW intent and its optional API extras. Shared by onCreate and
+     * onNewIntent so a relaunch into a live activity honours the new extras instead of silently
+     * reusing the previous launch's title, headers, subtitles and resume position.
+     *
+     * <p>Every extra is optional: with no recognised extra this is a plain "open this media".
+     */
+    private void handleMediaIntent(final Uri uri, final String type, final Bundle bundle) {
+        if (bundle != null) {
+            apiAccess = bundle.containsKey(API_POSITION) || bundle.containsKey(API_RETURN_RESULT)
+                    || bundle.containsKey(API_SUBS) || bundle.containsKey(API_SUBS_ENABLE);
+            if (apiAccess) {
+                mPrefs.setPersistent(false);
+            } else if (bundle.containsKey(API_TITLE)) {
+                apiAccessPartial = true;
+            }
+            apiTitle = bundle.getString(API_TITLE);
+            apiHeaders = Utils.parseIntentHeaders(getHeadersExtra(bundle));
+            apiSkipSegments = SkipSegmentParser.parse(bundle.getString(API_SKIP_SEGMENTS));
+        }
+
+        mPrefs.updateMedia(this, uri, type);
+
+        if (bundle != null) {
+            Uri defaultSub = null;
+            Parcelable[] subsEnable = bundle.getParcelableArray(API_SUBS_ENABLE);
+            if (subsEnable != null && subsEnable.length > 0) {
+                defaultSub = (Uri) subsEnable[0];
+            }
+
+            Parcelable[] subs = bundle.getParcelableArray(API_SUBS);
+            String[] subsName = bundle.getStringArray(API_SUBS_NAME);
+            if (subs != null && subs.length > 0) {
+                for (int i = 0; i < subs.length; i++) {
+                    Uri sub = (Uri) subs[i];
+                    String name = null;
+                    if (subsName != null && subsName.length > i) {
+                        name = subsName[i];
+                    }
+                    apiSubs.add(SubtitleUtils.buildSubtitle(this, sub, name, sub.equals(defaultSub)));
+                }
+            }
+        }
+
+        if (apiSubs.isEmpty()) {
+            searchSubtitles();
+        }
+
+        if (bundle != null) {
+            intentReturnResult = bundle.getBoolean(API_RETURN_RESULT);
+
+            if (bundle.containsKey(API_POSITION)) {
+                mPrefs.updatePosition((long) bundle.getInt(API_POSITION));
+            }
+        }
+    }
+
+    /** Removes and returns a header by case-insensitive name, or null when it is not present. */
+    private static String removeIgnoreCase(final Map<String, String> headers, final String name) {
+        for (Iterator<Map.Entry<String, String>> it = headers.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<String, String> entry = it.next();
+            if (name.equalsIgnoreCase(entry.getKey())) {
+                it.remove();
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Reads the optional "headers" extra. Launchers send it either as a String[] or as an
+     * ArrayList&lt;String&gt;, so accept both; anything else is treated as absent.
+     */
+    private static String[] getHeadersExtra(final Bundle bundle) {
+        final String[] array = bundle.getStringArray(API_HEADERS);
+        if (array != null) {
+            return array;
+        }
+        final ArrayList<String> list = bundle.getStringArrayList(API_HEADERS);
+        return list == null ? null : list.toArray(new String[0]);
     }
 
     @Override
@@ -1191,6 +1243,7 @@ public class PlayerActivity extends Activity {
 
         if (player != null) {
             if (customSubtitles != null) { customSubtitles.release(); customSubtitles = null; }
+            if (skipSegments != null) { skipSegments.release(); skipSegments = null; }
             player.removeListener(playerListener);
             player.clearMediaItems();
             player.release();
@@ -1244,13 +1297,26 @@ public class PlayerActivity extends Activity {
 
         if (haveMedia && isNetworkUri) {
             if (mPrefs.mediaUri.getScheme().toLowerCase().startsWith("http")) {
-                HashMap<String, String> headers = new HashMap<>();
+                // Headers from the launching intent, plus basic auth from the URI's user info.
+                // User info wins, as it is the more specific of the two for this exact URI.
+                Map<String, String> headers = new LinkedHashMap<>(apiHeaders);
                 String userInfo = mPrefs.mediaUri.getUserInfo();
                 if (userInfo != null && userInfo.length() > 0 && userInfo.contains(":")) {
                     headers.put("Authorization", "Basic " + Base64.encodeToString(userInfo.getBytes(), Base64.NO_WRAP));
+                }
+                if (!headers.isEmpty()) {
                     DefaultHttpDataSource.Factory defaultHttpDataSourceFactory = new DefaultHttpDataSource.Factory();
+                    // User-Agent has its own setter in DefaultHttpDataSource, so route it there
+                    // instead of depending on how it merges with the request properties.
+                    String userAgent = removeIgnoreCase(headers, "User-Agent");
+                    if (userAgent != null) {
+                        defaultHttpDataSourceFactory.setUserAgent(userAgent);
+                    }
                     defaultHttpDataSourceFactory.setDefaultRequestProperties(headers);
-                    playerBuilder.setMediaSourceFactory(new DefaultMediaSourceFactory(defaultHttpDataSourceFactory, extractorsFactory));
+                    // Wrapped in DefaultDataSource so content://, file:// and asset:// keep
+                    // resolving: sideloaded subtitles go through this same factory.
+                    playerBuilder.setMediaSourceFactory(new DefaultMediaSourceFactory(
+                            new DefaultDataSource.Factory(this, defaultHttpDataSourceFactory), extractorsFactory));
                 }
             }
         }
@@ -1331,6 +1397,11 @@ public class PlayerActivity extends Activity {
             if (customSubtitles != null) customSubtitles.release();
             customSubtitles = new CustomSubtitleController(this, playerView, player, trackSelector);
             customSubtitles.onMediaSet(mPrefs.mediaUri, apiAccess && apiSubs.size() > 0 ? apiSubs : null, mPrefs.subtitleUri);
+
+            // Intro/recap/ending skip buttons, when the launching app sent segments for this media.
+            if (skipSegments != null) skipSegments.release();
+            skipSegments = new SkipSegmentController(this, playerView, player);
+            skipSegments.setSegments(apiSkipSegments);
 
             try {
                 if (loudnessEnhancer != null) {
@@ -1433,6 +1504,7 @@ public class PlayerActivity extends Activity {
                 restorePlayState = true;
             }
             if (customSubtitles != null) { customSubtitles.release(); customSubtitles = null; }
+            if (skipSegments != null) { skipSegments.release(); skipSegments = null; }
             player.removeListener(playerListener);
             player.clearMediaItems();
             player.release();

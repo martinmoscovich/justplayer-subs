@@ -68,6 +68,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 class Utils {
 
@@ -403,6 +404,60 @@ class Utils {
     public static void log(final String text) {
         if (BuildConfig.DEBUG) {
             Log.d("JustPlayer", text);
+        }
+    }
+
+    // A header name (RFC 7230 token) followed by ':' and a non-blank value.
+    private static final Pattern HEADER_LINE = Pattern.compile("[A-Za-z0-9!#$%&'*+.^_`|~-]+:\\s*\\S.*");
+
+    /**
+     * Parses the "headers" intent extra used by external player launchers. Two incompatible
+     * conventions are in the wild, so both are accepted:
+     * <ul>
+     *     <li>one "Key: Value" string per element (Nuvio)</li>
+     *     <li>alternating key, value, key, value (MX Player, Kodi, VLC)</li>
+     * </ul>
+     * The "Key: Value" form is only assumed when every element looks like a header line, so an
+     * alternating array whose values contain a colon (a Referer URL, say) is not misread as it.
+     *
+     * @return header name to value in intent order, empty when there is nothing usable
+     */
+    public static Map<String, String> parseIntentHeaders(final String[] headers) {
+        final Map<String, String> parsed = new LinkedHashMap<>();
+        if (headers == null || headers.length == 0) {
+            return parsed;
+        }
+
+        boolean allHeaderLines = true;
+        for (String header : headers) {
+            if (header == null || !HEADER_LINE.matcher(header).matches()) {
+                allHeaderLines = false;
+                break;
+            }
+        }
+
+        if (allHeaderLines) {
+            for (String header : headers) {
+                final int separator = header.indexOf(':');
+                putHeader(parsed, header.substring(0, separator), header.substring(separator + 1));
+            }
+        } else if (headers.length % 2 == 0) {
+            for (int i = 0; i < headers.length; i += 2) {
+                putHeader(parsed, headers[i], headers[i + 1]);
+            }
+        } else {
+            log("Ignoring unrecognized headers extra with " + headers.length + " elements");
+        }
+        return parsed;
+    }
+
+    private static void putHeader(final Map<String, String> target, final String name, final String value) {
+        if (name == null || value == null) {
+            return;
+        }
+        final String trimmedName = name.trim();
+        if (!trimmedName.isEmpty()) {
+            target.put(trimmedName, value.trim());
         }
     }
 

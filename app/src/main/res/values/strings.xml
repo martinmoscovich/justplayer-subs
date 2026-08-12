@@ -58,4 +58,8 @@
     <string name="pref_subtitle_style_bold">Bold style</string>
     <string name="pref_subtitle_style_bold_on">Use bold typeface as regular</string>
     <string name="pref_subtitle_style_bold_off">Use default regular typeface</string>
+    <string name="skip_intro">Skip intro</string>
+    <string name="skip_recap">Skip recap</string>
+    <string name="skip_ending">Skip ending</string>
+    <string name="skip_generic">Skip</string>
 </resources>
