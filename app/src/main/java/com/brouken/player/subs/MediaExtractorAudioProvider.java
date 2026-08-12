@@ -115,6 +115,14 @@ public class MediaExtractorAudioProvider implements AudioProvider {
             decoder.start();
 
             float[] result = decodeAndResample(extractor, decoder, startUs, durationSeconds, onProgress);
+            // Requested vs delivered: a short window silently starves the resyncer's evidence gate,
+            // which then reports "no confident match" with no hint that it was fed less than it asked
+            // for. Decode can end early (EOS, stall timeout) and the seek lands on the previous sync
+            // sample, so neither the length nor the start is guaranteed to be what we asked for.
+            double deliveredSeconds = result == null ? 0.0 : result.length / 16_000.0;
+            Log.i(TAG, String.format(java.util.Locale.US,
+                    "extract: requested start=%.1fs duration=%.1fs -> delivered %.1fs (%d samples)",
+                    startSeconds, durationSeconds, deliveredSeconds, result == null ? 0 : result.length));
             if (result != null && onProgress != null) {
                 onProgress.onProgress(ResyncProgressListener.Phase.EXTRACTING, 1.0);
             }
