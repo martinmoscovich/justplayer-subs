@@ -54,6 +54,13 @@ public class CustomSubtitleController
         olp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
         olp.bottomMargin = Math.round(48 * context.getResources().getDisplayMetrics().density);
         root.addView(sync.getOverlayView(), olp);
+        // Follow the player's width so cues wrap instead of running edge to edge. A layout listener
+        // rather than a one-shot read: at construction time root has not been measured yet, and the
+        // width changes on resize (PiP, rotation, aspect-ratio switches).
+        sync.setMaxWidthPx(root.getWidth());
+        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l != or - ol) sync.setMaxWidthPx(r - l);
+        });
 
         panel = new SubtitlePanel(context);
         panel.setCallbacks(this);

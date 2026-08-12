@@ -2,6 +2,7 @@ package com.brouken.player.subs;
 
 import android.content.Context;
 import android.graphics.Color;
+import android.text.Layout;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
@@ -19,6 +20,9 @@ import subtitleengine.sync.ManualSyncSession;
  */
 public class SubtitleSyncController {
 
+    /** Share of the player width the overlay may use before wrapping; the rest is breathing room. */
+    private static final float OVERLAY_WIDTH_FRACTION = 0.9f;
+
     private final TextView overlay;
     private final ManualSyncSession session;
     private boolean active;
@@ -31,6 +35,19 @@ public class SubtitleSyncController {
         overlay.setGravity(Gravity.CENTER);
         overlay.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f);
         overlay.setVisibility(View.GONE);
+        // Wrap long cues onto balanced lines instead of one edge-to-edge run.
+        overlay.setBreakStrategy(Layout.BREAK_STRATEGY_BALANCED);
+    }
+
+    /**
+     * Caps the overlay width so a long cue wraps instead of stretching across the whole video. The
+     * coordinator feeds the player view's width, since the cap has to follow the surface size
+     * (fullscreen vs PiP, and every resize) rather than a fixed dp value.
+     */
+    public void setMaxWidthPx(int playerWidthPx) {
+        if (playerWidthPx > 0) {
+            overlay.setMaxWidth(Math.round(playerWidthPx * OVERLAY_WIDTH_FRACTION));
+        }
     }
 
     /** The overlay view; the coordinator adds it to the player view hierarchy. */
