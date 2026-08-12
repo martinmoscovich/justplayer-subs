@@ -100,7 +100,7 @@ public class TranslationController implements TranslationSession.Listener {
         } else {
             TranslationProgress p = lastProgress;
             text = (p != null)
-                    ? "Translating " + p.getCompletedChunks() + "/" + p.getTotalChunks()
+                    ? "Translating " + p.getCompletedChunks() + "/" + p.getTotalChunks() + formatCostSoFar(p)
                     : "Translating…";
         }
         if (!text.contentEquals(indicator.getText())) indicator.setText(text);
@@ -287,6 +287,7 @@ public class TranslationController implements TranslationSession.Listener {
                 if (inProgress > 0) running.append(" · ").append(inProgress).append(" in progress");
                 if (p.getFailedChunks() > 0) running.append(" · ").append(p.getFailedChunks()).append(" failed");
                 if (p.getReadyUntilMs() > 0) running.append(" · ready up to ").append(formatDuration(p.getReadyUntilMs()));
+                running.append(formatCostSoFar(p));
                 return running.toString();
             case DONE:
                 return formatDone(p);
@@ -299,6 +300,16 @@ public class TranslationController implements TranslationSession.Listener {
             default:
                 return "";
         }
+    }
+
+    /**
+     * Cost accrued by the chunks that have finished, as " · $0.0123", or empty until the provider
+     * has reported one. Shown live because a long run otherwise gives no hint of what it is spending
+     * until it ends — and by then the money is gone.
+     */
+    private static String formatCostSoFar(@Nullable TranslationProgress p) {
+        if (p == null || p.getStats() == null || p.getStats().getCostUsd() == null) return "";
+        return " · $" + String.format(Locale.US, "%.4f", p.getStats().getCostUsd());
     }
 
     private static String formatDone(@Nullable TranslationProgress p) {
