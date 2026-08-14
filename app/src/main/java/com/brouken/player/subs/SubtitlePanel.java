@@ -133,8 +133,18 @@ public class SubtitlePanel extends FrameLayout
     }
 
     public void open() {
+        openOn(Screen.SELECT); // subtitle button always lands on the selection screen first
+    }
+
+    /** Opens straight on the Translate screen — the notice's Translate button skips the sidebar. */
+    public void openTranslate() {
+        openOn(Screen.TRANSLATE);
+    }
+
+    private void openOn(Screen target) {
         setVisibility(VISIBLE);
-        screen = Screen.SELECT; // subtitle button always lands on the selection screen first
+        screen = target;
+        sidebarIndex = target.ordinal();
         syncView.reset();
         translateView.reset();
         showScreen();

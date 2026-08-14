@@ -25,6 +25,7 @@ public final class SubtitleSettings {
     public static final String KEY_TARGET_LANGS = "pref_target_languages";
     // Selection
     public static final String KEY_OPENSUBTITLES = "opensubtitles_api_key";
+    public static final String KEY_AUTO_SELECT = "pref_auto_select";
     // Sync
     public static final String KEY_REACTION_MS = "pref_reaction_ms";
     public static final String KEY_NUDGE_MS = "pref_nudge_ms";
@@ -73,6 +74,19 @@ public final class SubtitleSettings {
 
     public static void setLanguageList(Context c, String key, List<String> langs) {
         prefs(c).edit().putString(key, TextUtils.join(",", langs)).apply();
+    }
+
+    /**
+     * Whether the player picks a subtitle by itself (engine priority resolver). Off = the pre-existing
+     * behaviour: nothing is selected automatically and Media3's own default track selection applies.
+     */
+    public static boolean autoSelectEnabled(Context c) {
+        try {
+            return prefs(c).getBoolean(KEY_AUTO_SELECT, true);
+        } catch (ClassCastException e) {
+            prefs(c).edit().remove(KEY_AUTO_SELECT).apply();
+            return true;
+        }
     }
 
     /** Ordered preferred languages the user wants to see (target order, then source as fallback). */

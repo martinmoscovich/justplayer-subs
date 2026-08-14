@@ -165,6 +165,12 @@ public class TranslationController implements TranslationSession.Listener {
 
     // --- availability ---
 
+    /** Whether the Translate screen can actually do anything right now (key set, source parseable,
+     *  not already in the target language). Lets callers avoid offering a dead button. */
+    public boolean isAvailable() {
+        return canTranslate();
+    }
+
     private boolean canTranslate() {
         return reasonUnavailable() == null;
     }

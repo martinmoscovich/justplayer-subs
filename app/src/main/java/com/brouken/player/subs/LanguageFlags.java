@@ -7,9 +7,10 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Best-effort language-code → flag-emoji lookup for the subtitle selector rows. A language isn't a
- * country, so this is inherently approximate (picks one representative flag per language); codes
- * with no mapping just render without a flag.
+ * Best-effort language presentation for the subtitle UI: a code → flag-emoji lookup for the selector
+ * rows, plus the human-readable language name. A language isn't a country, so the flag half is
+ * inherently approximate (one representative flag per language); codes with no mapping just render
+ * without a flag.
  */
 final class LanguageFlags {
 
@@ -90,6 +91,22 @@ final class LanguageFlags {
     }
 
     private LanguageFlags() {
+    }
+
+    /**
+     * @return the English language name for a BCP-47/ISO tag ("es-MX" → "Spanish"), or {@code null}
+     *         when the tag is missing or the platform can't name it — the caller then has to phrase
+     *         its message without a language.
+     */
+    @Nullable
+    static String displayNameFor(@Nullable String languageTag) {
+        if (languageTag == null) return null;
+        String tag = languageTag.trim();
+        if (tag.isEmpty()) return null;
+        // English, not the device locale: the rest of this UI is written in English.
+        String name = Locale.forLanguageTag(tag.replace('_', '-')).getDisplayLanguage(Locale.ENGLISH);
+        if (name.isEmpty() || name.equalsIgnoreCase(tag)) return null; // unrecognised code
+        return name;
     }
 
     /** @return the flag emoji for the given BCP-47/ISO language tag, or {@code null} if unmapped. */

@@ -40,6 +40,7 @@ public class CustomSubtitleController
     private final SubtitlePanel panel;
     private final TranslationController translation;
     private final AutoSyncController autoSync;
+    private final SubtitleNoticeView notice;
     private boolean ticking;
     @Nullable private Uri mediaUri;
 
@@ -84,6 +85,15 @@ public class CustomSubtitleController
         alp.leftMargin = indicatorMargin;
         root.addView(autoSync.getIndicatorView(), alp);
 
+        // Top-centre: between the two corner indicators, and far from the cues at the bottom.
+        notice = new SubtitleNoticeView(context, handler);
+        notice.setListener(this::openTranslatePanel);
+        FrameLayout.LayoutParams nlp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nlp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
+        nlp.topMargin = indicatorMargin;
+        root.addView(notice, nlp);
+
         selection = new SubtitleSelectionController(context, player, trackSelector, this, handler);
     }
 
@@ -91,14 +101,21 @@ public class CustomSubtitleController
                            @Nullable List<MediaItem.SubtitleConfiguration> apiSubs,
                            @Nullable Uri prefsSubtitleUri) {
         this.mediaUri = mediaUri;
+        notice.hide(); // a notice about the previous media must not survive into this one
         selection.onMediaSet(mediaUri, apiSubs, prefsSubtitleUri);
         startTicking();
     }
 
-    /** Routes a key: opens the panel on the CC key (when subtitles exist), or into the open panel. */
+    /**
+     * Routes a key: into the open panel, then to the auto-selection notice while it is up (it only
+     * takes the navigation keys it needs), then the CC key opens the panel.
+     */
     public boolean dispatchKey(KeyEvent event) {
         if (panel.isOpen()) {
             return panel.handleKey(event);
+        }
+        if (notice.handleKey(event)) {
+            return true;
         }
         if (selection.hasOptions() && event.getAction() == KeyEvent.ACTION_DOWN
                 && event.getKeyCode() == KEY_OPEN_PANEL) {
@@ -118,10 +135,12 @@ public class CustomSubtitleController
         handler.removeCallbacksAndMessages(null);
         translation.release();
         autoSync.release();
+        notice.release();
         selection.release();
         removeFromParent(sync.getOverlayView());
         removeFromParent(translation.getIndicatorView());
         removeFromParent(autoSync.getIndicatorView());
+        removeFromParent(notice);
         removeFromParent(panel);
     }
 
@@ -197,6 +216,26 @@ public class CustomSubtitleController
     @Override public void onOptionsChanged(List<SubtitleOption> options, @Nullable String selectedId,
                                            boolean loadingMore) {
         panel.setOptions(options, selectedId, loadingMore);
+    }
+
+    /**
+     * Announces an automatic pick. A subtitle in a target language is just good news; anything else
+     * is a fallback the user may want translated, so it offers the shortcut — but only when
+     * translation can actually run (embedded tracks are never parsed, and the LLM needs a key).
+     */
+    @Override public void onAutoSelected(SubtitleOption option, boolean preferredLanguage) {
+        if (panel.isOpen()) return; // the selector already shows what is playing
+        String language = LanguageFlags.displayNameFor(option.language);
+        if (preferredLanguage) {
+            notice.show(language != null ? language + " subtitle found!" : "Subtitle found!", false);
+        } else {
+            notice.show(language != null ? language + " subtitle selected" : "Subtitle selected",
+                    translation.isAvailable());
+        }
+    }
+
+    private void openTranslatePanel() {
+        panel.openTranslate();
     }
 
     // --- render loop ---
