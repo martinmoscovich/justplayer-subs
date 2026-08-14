@@ -216,6 +216,8 @@ public class CustomSubtitleController
 
     @Override public void onRestoreOriginal() { translation.restoreOriginal(); }
 
+    @Override public void onTranslateAgain() { translation.translateAgain(currentPositionMs()); }
+
     @Override public void onStartAutoSync(boolean fromHere) {
         if (needsExtraction()) {
             embedded.ensureExtracted(selectedOption, file -> {
@@ -296,6 +298,7 @@ public class CustomSubtitleController
             }
         }
         translation.setExtractableSource(needsExtraction());
+        translation.setCache(embedded.cache(), embedded.keyFor(selectedOption));
         panel.setOptions(options, selectedId, loadingMore);
     }
 

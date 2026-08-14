@@ -130,6 +130,23 @@ public class TranslationController implements TranslationSession.Listener {
 
     // --- Callbacks entry points (from SubtitlePanel.Callbacks via CustomSubtitleController) ---
 
+    /**
+     * Binds the disk cache and the key identifying the current subtitle, so a translation already
+     * paid for is never paid for twice. A {@code null} key means this subtitle has no stable
+     * identity (unknown media) and simply runs uncached.
+     */
+    public void setCache(subtitleengine.cache.SubtitleCache cache, @Nullable String subtitleKey) {
+        session.setCache(cache, subtitleKey);
+        pushState();
+    }
+
+    /** "Translate again": drops the stored translation first, or the rerun would just serve it back. */
+    public void translateAgain(long positionMs) {
+        session.forgetTranslation(targetLanguage());
+        session.restoreOriginal();
+        start(positionMs);
+    }
+
     /** Sets/replaces the translatable source. {@code null} when nothing is loaded or an embedded track is active. */
     public void setSource(@Nullable SubtitleFile file, @Nullable String movieTitle) {
         this.source = file;
@@ -366,8 +383,11 @@ public class TranslationController implements TranslationSession.Listener {
                 : String.format(Locale.US, "$%.2f", costUsd);
     }
 
-    private static String formatDone(@Nullable TranslationProgress p) {
-        if (p == null || p.getStats() == null) return "Done";
+    private String formatDone(@Nullable TranslationProgress p) {
+        int reused = session.reusedEntries();
+        if (p == null || p.getStats() == null) {
+            return reused > 0 ? "Done — " + reused + " lines from cache, nothing to pay for" : "Done";
+        }
         boolean partial = p.getFailedChunks() > 0 || p.getUntranslatedEntries() > 0;
         TranslationStats stats = p.getStats();
         StringBuilder sb = new StringBuilder(partial ? "Partially translated — " : "Done — ")
@@ -375,6 +395,11 @@ public class TranslationController implements TranslationSession.Listener {
                 .append(String.format(Locale.US, "%,d", stats.getTotalTokens())).append(" tokens");
         if (stats.getCostUsd() != null) {
             sb.append(" · ").append(formatCost(stats.getCostUsd()));
+        }
+        if (reused > 0) {
+            // The cost above is what this run actually spent; saying how much came free is the only
+            // way the number makes sense next to a subtitle that is fully translated.
+            sb.append(" · ").append(reused).append(" lines reused from cache (not charged)");
         }
         if (p.getUntranslatedEntries() > 0) {
             sb.append(" — ").append(p.getUntranslatedEntries()).append(" lines kept in the original language");

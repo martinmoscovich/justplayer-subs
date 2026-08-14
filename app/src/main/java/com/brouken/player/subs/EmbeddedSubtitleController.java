@@ -118,10 +118,27 @@ public class EmbeddedSubtitleController {
         return hit != null && hit.isComplete();
     }
 
+    /** The shared disk cache — the translation side keys into the same store. */
+    public SubtitleCache cache() {
+        return cache;
+    }
+
+    /**
+     * Stable identity of a subtitle, for both halves of the cache. Every form is derivable before
+     * the expensive work: a provider result by its id, an external one by its URI, an embedded track
+     * by the media hash plus which track.
+     */
     @Nullable
-    private String keyFor(SubtitleOption option) {
-        if (videoHash == null || option.source != SubtitleOption.Source.EMBEDDED) return null;
-        return CacheKeys.embedded(videoHash, option.embeddedTextIndex);
+    public String keyFor(SubtitleOption option) {
+        if (option == null) return null;
+        switch (option.source) {
+            case EMBEDDED:
+                return videoHash == null ? null : CacheKeys.embedded(videoHash, option.embeddedTextIndex);
+            case PROVIDER:
+                return option.providerRef == null ? null : CacheKeys.provider(option.providerRef);
+            default:
+                return option.uri == null ? null : CacheKeys.external(option.uri.toString());
+        }
     }
 
     public boolean isRunning() {

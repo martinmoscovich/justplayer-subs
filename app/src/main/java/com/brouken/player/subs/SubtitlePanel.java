@@ -40,6 +40,7 @@ public class SubtitlePanel extends FrameLayout
         void onStartTranslate();
         void onCancelTranslate();
         void onRestoreOriginal();
+        void onTranslateAgain();
         void onStartAutoSync(boolean fromHere);
         void onCancelAutoSync();
     }
@@ -272,6 +273,7 @@ public class SubtitlePanel extends FrameLayout
     @Override public void onStartTranslate() { if (callbacks != null) callbacks.onStartTranslate(); }
     @Override public void onCancelTranslate() { if (callbacks != null) callbacks.onCancelTranslate(); }
     @Override public void onRestoreOriginal() { if (callbacks != null) callbacks.onRestoreOriginal(); }
+    @Override public void onTranslateAgain() { if (callbacks != null) callbacks.onTranslateAgain(); }
 
     // --- SyncView.Listener (auto-sync) ---
 

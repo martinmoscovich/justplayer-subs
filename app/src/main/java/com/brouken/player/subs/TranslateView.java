@@ -28,6 +28,8 @@ public class TranslateView extends FrameLayout {
         void onStartTranslate();
         void onCancelTranslate();
         void onRestoreOriginal();
+        /** Finished row: drop the cached translation and pay for a fresh one. */
+        void onTranslateAgain();
         /** ◄ past the leftmost button, or Back: move focus to the sidebar. */
         void onOpenMenu();
         /** Done button: close the whole panel. */
@@ -210,6 +212,7 @@ public class TranslateView extends FrameLayout {
                 // "Restore original" is secondary and must never hold default focus — it throws
                 // away a translation the user paid for. Done comes first.
                 buttons.add(new Btn("Done", this::requestClose));
+                buttons.add(new Btn("Translate again", this::translateAgain));
                 buttons.add(new Btn("Restore original", this::restoreOriginal));
                 break;
         }
@@ -260,6 +263,10 @@ public class TranslateView extends FrameLayout {
 
     private void cancelTranslate() {
         if (listener != null) listener.onCancelTranslate();
+    }
+
+    private void translateAgain() {
+        if (listener != null) listener.onTranslateAgain();
     }
 
     private void restoreOriginal() {
