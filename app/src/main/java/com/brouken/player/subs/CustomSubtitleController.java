@@ -204,6 +204,7 @@ public class CustomSubtitleController
         if (needsExtraction()) {
             embedded.ensureExtracted(selectedOption, file -> {
                 adoptExtractedSubtitle(file);
+                announceCacheUse();
                 translation.start(currentPositionMs());
             });
             return;
@@ -219,6 +220,7 @@ public class CustomSubtitleController
         if (needsExtraction()) {
             embedded.ensureExtracted(selectedOption, file -> {
                 adoptExtractedSubtitle(file);
+                announceCacheUse();
                 startAutoSync(fromHere);
             });
             return;
@@ -250,6 +252,20 @@ public class CustomSubtitleController
 
     private void onExtractionStatus(@Nullable String status) {
         panel.setExtractionStatus(status);
+    }
+
+    /**
+     * Says so when a subtitle came off the cache instead of being read again, and offers the way
+     * out. Only when the cache actually changed what would have happened — announcing every hit
+     * would fire on most playbacks and stop being read.
+     */
+    private void announceCacheUse() {
+        if (panel.isOpen() || selectedOption == null) return;
+        if (!embedded.lastWasFromCache()) return;
+        notice.show("Subtitles loaded from cache", "Read again", () -> {
+            embedded.forget(selectedOption);
+            onStartTranslate();
+        });
     }
 
     @Override public void onCancelAutoSync() { autoSync.cancel(); }

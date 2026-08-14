@@ -73,14 +73,25 @@ public class SubtitleNoticeView extends LinearLayout {
     }
 
     /**
+     * Shows the bar with one custom action before Dismiss — used for "this came from the cache,
+     * here is how to redo it".
+     */
+    public void show(String text, String actionLabel, Runnable action) {
+        prepare(text);
+        addButton(actionLabel, () -> {
+            hide();
+            action.run();
+        });
+        addButton("Dismiss", this::hide);
+        finish();
+    }
+
+    /**
      * Shows the bar. {@code withTranslate} adds the Translate button before Dismiss and starts the
      * focus on it — it is the action worth taking; Dismiss is the way out.
      */
     public void show(String text, boolean withTranslate) {
-        message.setText(text);
-        buttonRow.removeAllViews();
-        buttons.clear();
-        actions.clear();
+        prepare(text);
         if (withTranslate) {
             addButton("Translate", () -> {
                 hide();
@@ -88,9 +99,19 @@ public class SubtitleNoticeView extends LinearLayout {
             });
         }
         addButton("Dismiss", this::hide);
+        finish();
+    }
+
+    private void prepare(String text) {
+        message.setText(text);
+        buttonRow.removeAllViews();
+        buttons.clear();
+        actions.clear();
+    }
+
+    private void finish() {
         focusIndex = 0;
         styleButtons();
-
         setVisibility(VISIBLE);
         restartTimer();
     }

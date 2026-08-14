@@ -12,6 +12,10 @@ import java.util.Locale;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.Consumer;
 
+import subtitleengine.cache.CacheKeys;
+import subtitleengine.cache.CachePolicy;
+import subtitleengine.cache.CachedSubtitle;
+import subtitleengine.cache.SubtitleCache;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.embedded.EmbeddedExtractionSession;
 import subtitleengine.embedded.ExtractionProgress;
@@ -41,7 +45,12 @@ public class EmbeddedSubtitleController {
     };
 
     private final Context context;
+    private final Handler mainHandler;
     private final EmbeddedExtractionSession session;
+    private final SubtitleCache cache;
+    @Nullable private final java.util.Map<String, String> headers;
+    /** Identity of the media, computed once from 128 KB — null when it has none (a live stream). */
+    @Nullable private String videoHash;
 
     @Nullable private Uri mediaUri;
     /** Id of the option being extracted, and the callback waiting for it. */
@@ -50,6 +59,8 @@ public class EmbeddedSubtitleController {
     /** Last successful extraction, keyed by option id — re-opening Translate must not re-download. */
     @Nullable private String cachedOptionId;
     @Nullable private SubtitleFile cachedFile;
+    /** Whether the last satisfied request was served from disk — the UI says so. */
+    private boolean lastWasFromCache;
     @Nullable private Listener listener;
 
     public interface Listener {
@@ -60,6 +71,9 @@ public class EmbeddedSubtitleController {
     public EmbeddedSubtitleController(Context context, Handler mainHandler,
                                       @Nullable java.util.Map<String, String> headers) {
         this.context = context;
+        this.mainHandler = mainHandler;
+        this.headers = headers;
+        this.cache = new SubtitleCache(new FileCacheStore(context), CachePolicy.defaults());
         this.session = new EmbeddedExtractionSession(
                 new Media3EmbeddedSubtitleProvider(context, headers),
                 mainHandler::post,
@@ -76,6 +90,38 @@ public class EmbeddedSubtitleController {
         cancel();
         cachedOptionId = null;
         cachedFile = null;
+        videoHash = null;
+        if (mediaUri == null) return;
+        // Hashing costs two range requests, so it happens off the main thread — and its absence
+        // simply means this media runs uncached rather than failing.
+        new Thread(() -> {
+            String hash = MediaHasher.hash(context, mediaUri, headers);
+            mainHandler.post(() -> { if (mediaUri.equals(this.mediaUri)) videoHash = hash; });
+        }, "media-hash").start();
+    }
+
+    /** The disk cache, exposed so the panel can offer "read again" by invalidating an entry. */
+    public void forget(SubtitleOption option) {
+        String key = keyFor(option);
+        if (key != null) cache.removeSubtitleAndTranslations(key);
+        if (option.id.equals(cachedOptionId)) {
+            cachedOptionId = null;
+            cachedFile = null;
+        }
+    }
+
+    /** Whether the cues for {@code option} are already on disk — drives the "cached" marker. */
+    public boolean isCached(SubtitleOption option) {
+        String key = keyFor(option);
+        if (key == null) return false;
+        CachedSubtitle hit = cache.getSubtitle(key, System.currentTimeMillis());
+        return hit != null && hit.isComplete();
+    }
+
+    @Nullable
+    private String keyFor(SubtitleOption option) {
+        if (videoHash == null || option.source != SubtitleOption.Source.EMBEDDED) return null;
+        return CacheKeys.embedded(videoHash, option.embeddedTextIndex);
     }
 
     public boolean isRunning() {
@@ -99,9 +145,26 @@ public class EmbeddedSubtitleController {
         }
         if (isRunning()) return true; // already working on it; the running request wins
 
+        String key = keyFor(option);
+        session.setCache(cache, key);
+
+        // A finished read on disk costs nothing to reuse: no thread, no progress, no download.
+        CachedSubtitle hit = session.cached();
+        if (hit != null && hit.entryCount() > 0) {
+            Log.i(TAG, "cache hit for track " + option.embeddedTextIndex + ": "
+                    + hit.entryCount() + " cues, stored " + ageDescription(hit.getStoredAtMs()));
+            cachedOptionId = option.id;
+            cachedFile = hit.getSubtitle();
+            lastWasFromCache = true;
+            onReady.accept(cachedFile);
+            return true;
+        }
+
+        lastWasFromCache = false;
         pendingOptionId = option.id;
         pendingCallback = onReady;
-        Log.i(TAG, "extracting embedded track " + option.embeddedTextIndex + " ('" + option.label + "')");
+        Log.i(TAG, "extracting embedded track " + option.embeddedTextIndex + " ('" + option.label
+                + "') · cacheKey=" + key);
         session.start(mediaUri.toString(), option.embeddedTextIndex, option.language);
         return true;
     }
@@ -164,6 +227,18 @@ public class EmbeddedSubtitleController {
 
     private void notifyStatus(@Nullable String status) {
         if (listener != null) listener.onExtractionStatus(status);
+    }
+
+    /** True when what is on screen right now came from the cache rather than a fresh read. */
+    public boolean lastWasFromCache() {
+        return lastWasFromCache;
+    }
+
+    /** "today" / "3 days ago" — enough for a user to judge whether to re-read it. */
+    static String ageDescription(long storedAtMs) {
+        long days = (System.currentTimeMillis() - storedAtMs) / (24L * 60 * 60 * 1000);
+        if (days <= 0) return "today";
+        return days == 1 ? "yesterday" : days + " days ago";
     }
 
     private void toast(String message) {

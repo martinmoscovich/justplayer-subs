@@ -67,8 +67,8 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
     }
 
     @Override
-    public List<RawCue> readCues(String source, int trackIndex, @Nullable ProgressListener onProgress)
-            throws Exception {
+    public void readCues(String source, int trackIndex, @Nullable ProgressListener onProgress,
+                         CueSink sink) throws Exception {
         Uri uri = Uri.parse(source);
         DataSource dataSource = buildDataSource();
         Extractor extractor = null;
@@ -81,19 +81,18 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
                 throw new IOException("no Media3 extractor recognised this container");
             }
 
-            CueCollector collector = new CueCollector(trackIndex);
+            CueCollector collector = new CueCollector(trackIndex, sink);
             // The transcoding output is what makes the samples arrive as parsed cues instead of
             // raw codec payloads — the same wrapper DefaultExtractorsFactory uses for playback.
             extractor.init(new SubtitleTranscodingExtractorOutput(collector, new DefaultSubtitleParserFactory()));
 
             readToEnd(extractor, input, dataSource, uri, length, onProgress);
 
-            Log.i(TAG, "read " + collector.cues.size() + " cues from text track " + trackIndex
+            Log.i(TAG, "read " + collector.delivered + " cues from text track " + trackIndex
                     + " (" + collector.textTracksSeen + " text track(s) in the container)");
             if (collector.textTracksSeen == 0) {
                 throw new IOException("the container has no text tracks");
             }
-            return collector.cues;
         } finally {
             if (extractor != null) {
                 try { extractor.release(); } catch (Exception ignored) { }
@@ -182,18 +181,27 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
     private static final class CueCollector implements ExtractorOutput {
 
         private final int wantedTextTrackIndex;
-        final List<RawCue> cues = new ArrayList<>();
+        private final CueSink sink;
         int textTracksSeen;
+        int delivered;
 
-        CueCollector(int wantedTextTrackIndex) {
+        CueCollector(int wantedTextTrackIndex, CueSink sink) {
             this.wantedTextTrackIndex = wantedTextTrackIndex;
+            this.sink = sink;
         }
 
         @Override
         public TrackOutput track(int id, int type) {
             if (type != C.TRACK_TYPE_TEXT) return new DiscardingOutput();
             int textIndex = textTracksSeen++;
-            return textIndex == wantedTextTrackIndex ? new CueTrackOutput(cues) : new DiscardingOutput();
+            if (textIndex != wantedTextTrackIndex) return new DiscardingOutput();
+            // Cues are handed over as they decode, not collected and returned at the end: a cancelled
+            // read throws, and anything still held here would die with it instead of being kept as a
+            // resumable prefix.
+            return new CueTrackOutput(batch -> {
+                delivered += batch.size();
+                sink.accept(batch);
+            });
         }
 
         @Override public void endTracks() { }
@@ -204,12 +212,12 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
     /** Accumulates one track's sample bytes and turns each completed sample into {@link RawCue}s. */
     private static final class CueTrackOutput implements TrackOutput {
 
-        private final List<RawCue> out;
+        private final CueSink out;
         private final CueDecoder decoder = new CueDecoder();
         private byte[] buffer = new byte[1024];
         private int bufferedBytes;
 
-        CueTrackOutput(List<RawCue> out) {
+        CueTrackOutput(CueSink out) {
             this.out = out;
         }
 
@@ -266,13 +274,15 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
             long startMs = decoded.startTimeUs / 1000;
             boolean hasDuration = decoded.durationUs != C.TIME_UNSET && decoded.durationUs > 0;
             long endMs = hasDuration ? (decoded.startTimeUs + decoded.durationUs) / 1000 : RawCue.UNKNOWN_END_MS;
+            List<RawCue> batch = new ArrayList<>(decoded.cues.size());
             for (Cue cue : decoded.cues) {
                 // Bitmap cues (PGS/VobSub) carry no text — nothing to translate, and the caller
                 // should not have offered the track in the first place.
                 if (cue.text == null) continue;
                 String text = cue.text.toString();
-                out.add(hasDuration ? RawCue.of(startMs, endMs, text) : RawCue.openEnded(startMs, text));
+                batch.add(hasDuration ? RawCue.of(startMs, endMs, text) : RawCue.openEnded(startMs, text));
             }
+            if (!batch.isEmpty()) out.accept(batch);
         }
 
         private void ensureCapacity(int needed) {
