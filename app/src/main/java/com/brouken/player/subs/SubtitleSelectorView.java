@@ -46,17 +46,20 @@ public class SubtitleSelectorView extends LinearLayout {
     private enum TabKey { PREFERRED, OTHERS }
     private enum Focus { TABS, LIST }
 
-    /** One option row: a container (for background) plus the left-aligned label and the
-     *  right-aligned rating/downloads meta text ({@code null} when there's nothing to show). */
+    /** One option row: a container (for background), the left-aligned label, the right-aligned
+     *  rating/downloads meta text, and the "PLAYING" badge — the last two are {@code null} when the
+     *  row has no meta / is not the selected one. */
     private static final class Row {
         final View container;
         final TextView main;
         @Nullable final TextView meta;
+        @Nullable final TextView badge;
 
-        Row(View container, TextView main, @Nullable TextView meta) {
+        Row(View container, TextView main, @Nullable TextView meta, @Nullable TextView badge) {
             this.container = container;
             this.main = main;
             this.meta = meta;
+            this.badge = badge;
         }
     }
 
@@ -67,6 +70,7 @@ public class SubtitleSelectorView extends LinearLayout {
     private static final int ERROR = 0xFFEF9A9A;
     private static final int HEADER = 0xFF7A8A93;
 
+    private final TextView statusLine;
     private final TextView preferredTabView;
     private final TextView othersTabView;
     private final ScrollView scroll;
@@ -88,6 +92,15 @@ public class SubtitleSelectorView extends LinearLayout {
     public SubtitleSelectorView(Context c) {
         super(c);
         setOrientation(VERTICAL);
+
+        // Above the tabs, so the answer to "which one am I watching?" is on screen whatever the
+        // list is scrolled to, and whichever tab the selected row lives in.
+        statusLine = new TextView(c);
+        statusLine.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        statusLine.setSingleLine(true);
+        statusLine.setEllipsize(TextUtils.TruncateAt.END);
+        statusLine.setPadding(dp(16), dp(12), dp(16), dp(4));
+        addView(statusLine, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
         LinearLayout tabBar = new LinearLayout(c);
         tabBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -356,13 +369,52 @@ public class SubtitleSelectorView extends LinearLayout {
             container.addView(meta);
         }
 
+        // The selected row also turns teal, but focus paints a row white — the badge is what keeps
+        // the current choice visible while the user moves the highlight over it.
+        TextView badge = null;
+        if (o.id.equals(selectedId)) {
+            badge = new TextView(getContext());
+            badge.setText("PLAYING");
+            badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            badge.setTextColor(0xFF00251F);
+            badge.setBackgroundColor(TEAL);
+            badge.setPadding(dp(8), dp(2), dp(8), dp(2));
+            LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            badgeLp.leftMargin = dp(12);
+            badgeLp.gravity = Gravity.CENTER_VERTICAL;
+            badge.setLayoutParams(badgeLp);
+            container.addView(badge);
+        }
+
         column.addView(container);
-        rowViews.add(new Row(container, main, meta));
+        rowViews.add(new Row(container, main, meta, badge));
     }
 
     private void styleAll() {
+        styleStatusLine();
         styleTabBar();
         styleRows();
+    }
+
+    private void styleStatusLine() {
+        SubtitleOption sel = selectedId != null ? byId.get(selectedId) : null;
+        if (sel == null) {
+            statusLine.setText("No subtitle selected");
+            statusLine.setTextColor(DIM);
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        switch (sel.state) {
+            case LOADING: sb.append("⟳ Loading: "); break;
+            case ERROR:   sb.append("⚠ Failed: "); break;
+            default:      sb.append("▶ Now showing: "); break;
+        }
+        String flag = LanguageFlags.flagFor(sel.language);
+        if (flag != null) sb.append(flag).append(' ');
+        sb.append(sel.label);
+        statusLine.setText(sb.toString());
+        statusLine.setTextColor(sel.state == SubtitleOption.State.ERROR ? ERROR : TEAL);
     }
 
     private void styleTabBar() {
