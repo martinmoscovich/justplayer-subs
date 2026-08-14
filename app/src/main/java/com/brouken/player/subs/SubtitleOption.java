@@ -25,6 +25,8 @@ public class SubtitleOption {
     @Nullable public final String language;
     public final Source source;
     public State state;
+    /** Set when this option's cues came off the cache rather than the network — the UI says so. */
+    public boolean fromCache;
 
     /** EXTERNAL: the subtitle URI. */
     @Nullable public final Uri uri;

@@ -413,6 +413,7 @@ public class SubtitleSelectorView extends LinearLayout {
         String flag = LanguageFlags.flagFor(sel.language);
         if (flag != null) sb.append(flag).append(' ');
         sb.append(sel.label);
+        if (sel.fromCache && sel.state == SubtitleOption.State.READY) sb.append("  ·  cached");
         statusLine.setText(sb.toString());
         statusLine.setTextColor(sel.state == SubtitleOption.State.ERROR ? ERROR : TEAL);
     }

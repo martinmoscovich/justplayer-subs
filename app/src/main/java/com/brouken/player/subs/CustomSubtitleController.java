@@ -101,6 +101,7 @@ public class CustomSubtitleController
         embedded.setListener(this::onExtractionStatus);
 
         selection = new SubtitleSelectionController(context, player, trackSelector, this, handler);
+        selection.setCache(embedded.cache()); // one store for every kind of subtitle
         // After `selection` exists: the hash releases the provider search, which matches on it.
         embedded.setOnHashReady(sizeBytes -> selection.onMediaHash(embedded.videoHash(), sizeBytes));
     }
