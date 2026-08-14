@@ -101,6 +101,8 @@ public class CustomSubtitleController
         embedded.setListener(this::onExtractionStatus);
 
         selection = new SubtitleSelectionController(context, player, trackSelector, this, handler);
+        // After `selection` exists: the hash releases the provider search, which matches on it.
+        embedded.setOnHashReady(sizeBytes -> selection.onMediaHash(embedded.videoHash(), sizeBytes));
     }
 
     public void onMediaSet(@Nullable Uri mediaUri,

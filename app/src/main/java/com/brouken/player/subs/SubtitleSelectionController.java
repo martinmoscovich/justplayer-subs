@@ -105,6 +105,8 @@ public class SubtitleSelectionController {
      *  external/provider download can still fail), not when it is chosen. */
     @Nullable private String pendingAutoNoticeId;
     private boolean pendingAutoNoticePreferred;
+    @Nullable private String mediaHash;
+    @Nullable private String mediaBytes;
 
     public SubtitleSelectionController(Context context, ExoPlayer player,
                                        DefaultTrackSelector trackSelector, Listener listener,
@@ -122,6 +124,8 @@ public class SubtitleSelectionController {
         manuallySelected = false;
         pendingAutoNoticeId = null;
         selectedId = null;
+        mediaHash = null;
+        mediaBytes = null;
         buildExternalOptions(apiSubs, prefsSubtitleUri, mediaUri);
 
         if (tracksListener == null) {
@@ -141,6 +145,19 @@ public class SubtitleSelectionController {
 
         refresh();
         autoSelect();
+        // The provider search waits for onMediaHash(): matching on the media's hash finds subtitles
+        // for this exact release, where a title match cannot tell two of them apart. The hash costs
+        // 128 KB and about a second, which is worth it — and onMediaHash() always arrives, with null
+        // when the media has no stable identity, so the search is never lost.
+    }
+
+    /**
+     * The media's OpenSubtitles hash and size, or nulls when it has none. Arrives once per media and
+     * releases the provider search.
+     */
+    public void onMediaHash(@Nullable String hash, @Nullable String sizeBytes) {
+        this.mediaHash = hash;
+        this.mediaBytes = sizeBytes;
         maybeSearchProvider();
     }
 
@@ -404,7 +421,8 @@ public class SubtitleSelectionController {
 
         new Thread(() -> {
             SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
-            ContentMetadata meta = new ContentMetadata(title, null, null, null, null, null, null, title);
+            ContentMetadata meta = new ContentMetadata(title, null, null, null, null, null, null, title,
+                    mediaHash, mediaBytes);
             try {
                 List<SubtitleSearchResult> results = provider.searchByPriority(meta, langs, null);
                 mainHandler.post(() -> onProviderResults(results));

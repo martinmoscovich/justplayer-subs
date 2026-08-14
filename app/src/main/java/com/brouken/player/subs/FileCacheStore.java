@@ -46,13 +46,16 @@ public class FileCacheStore implements CacheStore {
         // truncated entry that reads back as corrupt on every future launch.
         File target = fileFor(key);
         File tmp = new File(dir, target.getName() + ".tmp");
-        Files.write(tmp.toPath(), data);
-        if (!tmp.renameTo(target)) {
-            Files.deleteIfExists(target.toPath());
+        try {
+            Files.write(tmp.toPath(), data);
             if (!tmp.renameTo(target)) {
-                Files.deleteIfExists(tmp.toPath());
-                throw new IOException("cannot replace " + target);
+                Files.deleteIfExists(target.toPath());
+                if (!tmp.renameTo(target)) throw new IOException("cannot replace " + target);
             }
+        } finally {
+            // Never leave a .tmp behind: keys() ignores them, so they would accumulate invisibly
+            // and no sweep would ever reclaim them.
+            Files.deleteIfExists(tmp.toPath());
         }
     }
 

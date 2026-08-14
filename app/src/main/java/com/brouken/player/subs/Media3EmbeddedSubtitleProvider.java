@@ -67,8 +67,8 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
     }
 
     @Override
-    public void readCues(String source, int trackIndex, @Nullable ProgressListener onProgress,
-                         CueSink sink) throws Exception {
+    public void readCues(String source, int trackIndex, long resumeFromMs,
+                         @Nullable ProgressListener onProgress, CueSink sink) throws Exception {
         Uri uri = Uri.parse(source);
         DataSource dataSource = buildDataSource();
         Extractor extractor = null;
@@ -86,7 +86,7 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
             // raw codec payloads — the same wrapper DefaultExtractorsFactory uses for playback.
             extractor.init(new SubtitleTranscodingExtractorOutput(collector, new DefaultSubtitleParserFactory()));
 
-            readToEnd(extractor, input, dataSource, uri, length, onProgress);
+            readToEnd(extractor, input, dataSource, uri, length, resumeFromMs, collector, onProgress);
 
             Log.i(TAG, "read " + collector.delivered + " cues from text track " + trackIndex
                     + " (" + collector.textTracksSeen + " text track(s) in the container)");
@@ -133,7 +133,8 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
      * much of the file has been consumed.
      */
     private void readToEnd(Extractor extractor, ExtractorInput input, DataSource dataSource, Uri uri,
-                           long length, @Nullable ProgressListener onProgress)
+                           long length, long resumeFromMs, CueCollector collector,
+                           @Nullable ProgressListener onProgress)
             throws IOException, InterruptedException {
         PositionHolder positionHolder = new PositionHolder();
         long total = length;
@@ -143,11 +144,37 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
         // playback (measured: ~950 skipped frames, a 15s stall). Report in 0.5% steps instead —
         // ~200 updates for a whole file, which is more than a progress line can show anyway.
         int lastReportedBucket = -1;
+        // The SeekMap only exists once the container's headers have been parsed, so a resume cannot
+        // happen before the read starts — it happens as soon as the map shows up.
+        boolean resumePending = resumeFromMs > 0;
         int result;
         do {
             // Cancellation: this loop can be minutes of network reads, and nobody is waiting for a
             // download the user already called off.
             if (Thread.interrupted()) throw new InterruptedException();
+
+            if (resumePending && collector.seekMap != null) {
+                resumePending = false;
+                SeekMap map = collector.seekMap;
+                if (map.isSeekable()) {
+                    // Land on the sync point at or before the resume time: the cues between it and
+                    // the resume point are replayed, and the caller drops them as overlap. Seeking
+                    // past it would lose cues outright, which is the one outcome worth avoiding.
+                    SeekMap.SeekPoints points = map.getSeekPoints(resumeFromMs * 1000L);
+                    long position = points.first.position;
+                    extractor.seek(position, points.first.timeUs);
+                    dataSource.close();
+                    long remaining = dataSource.open(
+                            new DataSpec.Builder().setUri(uri).setPosition(position).build());
+                    currentInput = new DefaultExtractorInput(dataSource, position,
+                            remaining == C.LENGTH_UNSET ? C.LENGTH_UNSET : position + remaining);
+                    Log.i(TAG, "resuming from " + resumeFromMs + "ms → byte " + position
+                            + " of " + total);
+                } else {
+                    Log.i(TAG, "container is not seekable — reading from the start instead of "
+                            + "skipping, since a gap would be worse than the wait");
+                }
+            }
 
             result = extractor.read(currentInput, positionHolder);
             if (result == Extractor.RESULT_SEEK) {
@@ -206,7 +233,12 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
 
         @Override public void endTracks() { }
 
-        @Override public void seekMap(SeekMap seekMap) { }
+        /** Captured so a resumed read can ask it where a given timestamp lives in the file. */
+        @Nullable SeekMap seekMap;
+
+        @Override public void seekMap(SeekMap seekMap) {
+            this.seekMap = seekMap;
+        }
     }
 
     /** Accumulates one track's sample bytes and turns each completed sample into {@link RawCue}s. */

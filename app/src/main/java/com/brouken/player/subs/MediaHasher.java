@@ -41,6 +41,13 @@ public final class MediaHasher {
      */
     @Nullable
     public static String hash(Context context, Uri uri, @Nullable Map<String, String> headers) {
+        String[] both = hashAndSize(context, uri, headers);
+        return both == null ? null : both[0];
+    }
+
+    /** @return {@code [hexHash, sizeBytes]}, or {@code null} — OpenSubtitles matches on both. */
+    @Nullable
+    public static String[] hashAndSize(Context context, Uri uri, @Nullable Map<String, String> headers) {
         DataSource dataSource = build(context, headers);
         try {
             long size = dataSource.open(new DataSpec.Builder().setUri(uri).build());
@@ -60,9 +67,9 @@ public final class MediaHasher {
                         .build());
                 tail = readFully(dataSource, OpenSubtitlesHash.CHUNK_BYTES);
             }
-            String hash = OpenSubtitlesHash.fromChunks(size, head, tail)[0];
-            Log.i(TAG, "media hash " + hash + " (size " + size + ")");
-            return hash;
+            String[] hashAndSize = OpenSubtitlesHash.fromChunks(size, head, tail);
+            Log.i(TAG, "media hash " + hashAndSize[0] + " (size " + size + ")");
+            return hashAndSize;
         } catch (Exception e) {
             Log.w(TAG, "could not hash the media — continuing without cache", e);
             return null;

@@ -62,6 +62,7 @@ public class EmbeddedSubtitleController {
     /** Whether the last satisfied request was served from disk — the UI says so. */
     private boolean lastWasFromCache;
     @Nullable private Listener listener;
+    @Nullable private Consumer<String> onHashReady;
 
     public interface Listener {
         /** Progress text for the panel, or {@code null} when nothing is running. */
@@ -85,6 +86,16 @@ public class EmbeddedSubtitleController {
         this.listener = l;
     }
 
+    /** Called once per media with the size in bytes (null when unhashable); read {@link #videoHash()} with it. */
+    public void setOnHashReady(@Nullable Consumer<String> onHashReady) {
+        this.onHashReady = onHashReady;
+    }
+
+    @Nullable
+    public String videoHash() {
+        return videoHash;
+    }
+
     public void setMedia(@Nullable Uri mediaUri) {
         this.mediaUri = mediaUri;
         cancel();
@@ -95,8 +106,14 @@ public class EmbeddedSubtitleController {
         // Hashing costs two range requests, so it happens off the main thread — and its absence
         // simply means this media runs uncached rather than failing.
         new Thread(() -> {
-            String hash = MediaHasher.hash(context, mediaUri, headers);
-            mainHandler.post(() -> { if (mediaUri.equals(this.mediaUri)) videoHash = hash; });
+            String[] hashAndSize = MediaHasher.hashAndSize(context, mediaUri, headers);
+            mainHandler.post(() -> {
+                if (!mediaUri.equals(this.mediaUri)) return; // media changed while we hashed
+                videoHash = hashAndSize == null ? null : hashAndSize[0];
+                if (onHashReady != null) {
+                    onHashReady.accept(hashAndSize == null ? null : hashAndSize[1]);
+                }
+            });
         }, "media-hash").start();
     }
 
