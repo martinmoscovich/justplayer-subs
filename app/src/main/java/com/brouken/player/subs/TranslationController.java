@@ -179,7 +179,8 @@ public class TranslationController implements TranslationSession.Listener {
     }
 
     public void release() {
-        session.cancel();
+        // Teardown, not a rejection: whatever chunks were already paid for stay cached.
+        session.abandon();
     }
 
     // --- availability ---
