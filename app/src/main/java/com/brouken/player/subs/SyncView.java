@@ -74,7 +74,12 @@ public class SyncView extends FrameLayout {
 
     private final TextView readout;
     private final TextView hint;
+    /** Shown when there is nothing to sync. Embedded tracks reach this screen with no cues until
+     *  their container has been read, and pressing Auto-sync is what starts that read. */
+    private static final String EMPTY_MESSAGE = "Nothing to sync yet\nPress Auto-sync to read this track from the video";
+
     private final TextView emptyMessage;
+    @Nullable private String busyStatus;
     private final VerticalGridView list;
     private final LinearLayout buttonRow;
     private final CueAdapter adapter = new CueAdapter();
@@ -114,7 +119,7 @@ public class SyncView extends FrameLayout {
         emptyMessage = label(17, 0xFFB0BEC5);
         emptyMessage.setGravity(Gravity.CENTER);
         emptyMessage.setPadding(dp(40), 0, dp(40), 0);
-        emptyMessage.setText("This subtitle can't be synced\n(embedded — assumed in sync)");
+        emptyMessage.setText(EMPTY_MESSAGE);
         emptyMessage.setVisibility(GONE);
         FrameLayout.LayoutParams emp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -173,6 +178,16 @@ public class SyncView extends FrameLayout {
         list.setVisibility(empty ? GONE : VISIBLE);
         updateReadout();
         updateButtons();
+    }
+
+    /**
+     * A blocking step this screen is waiting on — reading an embedded track's cues out of the
+     * container. It replaces the empty-state message, which is exactly the state the screen is in
+     * while it runs; {@code null} restores it.
+     */
+    public void setBusyStatus(@Nullable String busy) {
+        this.busyStatus = busy;
+        emptyMessage.setText(busy != null ? busy : EMPTY_MESSAGE);
     }
 
     /** Pushes formatted auto-sync state (see {@link AutoSyncController}). A confident result opens Zone.REVIEW. */

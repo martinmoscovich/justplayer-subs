@@ -41,8 +41,11 @@ public class CustomSubtitleController
     private final TranslationController translation;
     private final AutoSyncController autoSync;
     private final SubtitleNoticeView notice;
+    private final EmbeddedSubtitleController embedded;
     private boolean ticking;
     @Nullable private Uri mediaUri;
+    /** The option currently selected, kept so the Translate/Sync screens know what they are acting on. */
+    @Nullable private SubtitleOption selectedOption;
 
     public CustomSubtitleController(Context context, ViewGroup root, ExoPlayer player,
                                     DefaultTrackSelector trackSelector) {
@@ -94,6 +97,9 @@ public class CustomSubtitleController
         nlp.topMargin = indicatorMargin;
         root.addView(notice, nlp);
 
+        embedded = new EmbeddedSubtitleController(context, handler, null);
+        embedded.setListener(this::onExtractionStatus);
+
         selection = new SubtitleSelectionController(context, player, trackSelector, this, handler);
     }
 
@@ -101,7 +107,9 @@ public class CustomSubtitleController
                            @Nullable List<MediaItem.SubtitleConfiguration> apiSubs,
                            @Nullable Uri prefsSubtitleUri) {
         this.mediaUri = mediaUri;
+        this.selectedOption = null;
         notice.hide(); // a notice about the previous media must not survive into this one
+        embedded.setMedia(mediaUri);
         selection.onMediaSet(mediaUri, apiSubs, prefsSubtitleUri);
         startTicking();
     }
@@ -136,6 +144,7 @@ public class CustomSubtitleController
         translation.release();
         autoSync.release();
         notice.release();
+        embedded.release();
         selection.release();
         removeFromParent(sync.getOverlayView());
         removeFromParent(translation.getIndicatorView());
@@ -183,15 +192,64 @@ public class CustomSubtitleController
         context.startActivity(i);
     }
 
-    @Override public void onStartTranslate() { translation.start(currentPositionMs()); }
+    /**
+     * An embedded track has no cues to translate until we read them out of the container, so the
+     * request turns into "extract, then translate". Everything else already has its
+     * {@code SubtitleFile} and starts immediately.
+     */
+    @Override public void onStartTranslate() {
+        android.util.Log.i("EmbeddedSubtitles", "translate requested · selected="
+                + (selectedOption != null ? selectedOption.label + "/" + selectedOption.source : "none")
+                + " needsExtraction=" + needsExtraction());
+        if (needsExtraction()) {
+            embedded.ensureExtracted(selectedOption, file -> {
+                adoptExtractedSubtitle(file);
+                translation.start(currentPositionMs());
+            });
+            return;
+        }
+        translation.start(currentPositionMs());
+    }
 
     @Override public void onCancelTranslate() { translation.cancel(); }
 
     @Override public void onRestoreOriginal() { translation.restoreOriginal(); }
 
     @Override public void onStartAutoSync(boolean fromHere) {
+        if (needsExtraction()) {
+            embedded.ensureExtracted(selectedOption, file -> {
+                adoptExtractedSubtitle(file);
+                startAutoSync(fromHere);
+            });
+            return;
+        }
+        startAutoSync(fromHere);
+    }
+
+    private void startAutoSync(boolean fromHere) {
         if (fromHere) autoSync.startFromHere(player != null ? player.getCurrentPosition() : 0L);
         else autoSync.startFromBeginning(player != null ? player.getDuration() : 0L);
+    }
+
+    /** True when what is selected is an embedded track we have not read the cues of yet. */
+    private boolean needsExtraction() {
+        return selectedOption != null
+                && selectedOption.source == SubtitleOption.Source.EMBEDDED
+                && !selectedOption.imageFormat
+                && !sync.isActive(); // active == the overlay already owns a parsed subtitle
+    }
+
+    /**
+     * Promotes a freshly-read embedded track to a first-class subtitle: from here on our overlay
+     * draws it and Media3's text track goes off, which is what makes sync and translation apply to
+     * it at all (and keeps a single subtitle on screen).
+     */
+    private void adoptExtractedSubtitle(SubtitleFile file) {
+        selection.replaceActiveWithExtracted(file);
+    }
+
+    private void onExtractionStatus(@Nullable String status) {
+        panel.setExtractionStatus(status);
     }
 
     @Override public void onCancelAutoSync() { autoSync.cancel(); }
@@ -215,6 +273,13 @@ public class CustomSubtitleController
 
     @Override public void onOptionsChanged(List<SubtitleOption> options, @Nullable String selectedId,
                                            boolean loadingMore) {
+        selectedOption = null;
+        if (selectedId != null) {
+            for (SubtitleOption o : options) {
+                if (o.id.equals(selectedId)) { selectedOption = o; break; }
+            }
+        }
+        translation.setExtractableSource(needsExtraction());
         panel.setOptions(options, selectedId, loadingMore);
     }
 

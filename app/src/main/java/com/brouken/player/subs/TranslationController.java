@@ -47,6 +47,8 @@ public class TranslationController implements TranslationSession.Listener {
     private static final long TERMINAL_FLASH_MS = 3000;
 
     @Nullable private SubtitleFile source;
+    /** The selection has no cues yet but they can be read out of the container on demand. */
+    private boolean extractableSource;
     @Nullable private TranslationProgress lastProgress;
     private boolean toastedForRun; // one Toast per run, not per chunk
     @Nullable private String indicatorTerminalText; // non-null while the post-run flash is live
@@ -175,10 +177,25 @@ public class TranslationController implements TranslationSession.Listener {
         return reasonUnavailable() == null;
     }
 
+    /**
+     * Whether the current selection could yield cues on demand (an embedded text track). Without
+     * this the screen is a dead end: it reports "no source" precisely for the tracks whose source is
+     * one extraction away, and the button that would start that extraction is the one UNAVAILABLE
+     * hides.
+     */
+    public void setExtractableSource(boolean extractable) {
+        if (this.extractableSource == extractable) return;
+        this.extractableSource = extractable;
+        pushState();
+    }
+
     @Nullable
     private String reasonUnavailable() {
         if (!hasApiKey()) return "No AI API key — set one in Settings > Translation";
-        if (source == null) return "Embedded tracks can't be translated yet";
+        if (source == null) {
+            // Available on purpose: pressing Translate reads the track first, then translates it.
+            return extractableSource ? null : "Nothing to translate — pick a subtitle first";
+        }
         String target = targetLanguage();
         if (!session.canTranslate(target)) return "Already in " + target;
         return null;

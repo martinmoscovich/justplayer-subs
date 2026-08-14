@@ -164,6 +164,11 @@ public class SubtitleSelectionController {
     public void selectOption(String id) {
         manuallySelected = true;
         pendingAutoNoticeId = null;
+        SubtitleOption opt = findOption(id);
+        // Logged like the automatic path: without this, the only decision that leaves no trace is
+        // the one the user made, which is exactly the one you need when reproducing a report.
+        android.util.Log.i(TAG, "manually selected " + (opt != null
+                ? "'" + opt.label + "' (" + opt.source + ", lang=" + opt.language + ")" : id));
         applySelection(id);
     }
 
@@ -178,6 +183,20 @@ public class SubtitleSelectionController {
         } else {
             loadExternal(opt);
         }
+    }
+
+    /**
+     * Hands rendering of the selected embedded track over to our overlay, now that its cues have
+     * been read out of the container. The option stays exactly where it is in the list — from the
+     * user's point of view nothing was selected, it just became syncable and translatable — but
+     * Media3's text track goes off, so only one subtitle is ever on screen.
+     */
+    public void replaceActiveWithExtracted(SubtitleFile file) {
+        if (selectedId == null) return;
+        disableMedia3TextTrack();
+        listener.onSubtitleLoaded(file);
+        refresh();
+        android.util.Log.i(TAG, "embedded track promoted to overlay: " + file.getEntries().size() + " cues");
     }
 
     // --- auto-selection (engine decides; this only maps to and from its model) ---

@@ -123,6 +123,15 @@ public class SubtitlePanel extends FrameLayout
         styleSidebar();
     }
 
+    /**
+     * Shows how far the read of an embedded track has got, on whichever screen asked for it. Passing
+     * {@code null} clears it — the screens then go back to reporting their own state.
+     */
+    public void setExtractionStatus(String status) {
+        translateView.setBusyStatus(status);
+        syncView.setBusyStatus(status);
+    }
+
     /** Pushes formatted auto-sync state (see {@link AutoSyncController}) into the Sync screen. */
     public void setAutoSyncState(AutoSyncUiState state) {
         syncView.setAutoSyncState(state);

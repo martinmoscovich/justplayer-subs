@@ -57,6 +57,10 @@ public class TranslateView extends FrameLayout {
     private int buttonIndex = 0;
     private boolean hasFocus = true;
     private ButtonState buttonState = ButtonState.IDLE;
+    /** What this screen would say on its own, and what a blocking step says over it (see setBusyStatus). */
+    private String ownStatus = "";
+    private ButtonState ownStatusState = ButtonState.IDLE;
+    @Nullable private String busyStatus;
 
     public TranslateView(Context context) {
         super(context);
@@ -87,10 +91,21 @@ public class TranslateView extends FrameLayout {
         this.listener = l;
     }
 
+    /**
+     * A blocking step this screen is waiting on before it can do its own work — today, reading an
+     * embedded track's cues out of the container. It takes over the status line because until it
+     * finishes there is no translation state worth reporting; {@code null} gives the line back.
+     */
+    public void setBusyStatus(@Nullable String busy) {
+        this.busyStatus = busy;
+        renderStatus();
+    }
+
     /** Pushes the current translation state. Buttons are only rebuilt (and focus reset) on a row change. */
     public void setState(boolean available, @Nullable String reason, String status, ButtonState newState) {
-        statusView.setText(status);
-        statusView.setTextColor(statusColor(newState));
+        this.ownStatus = status;
+        this.ownStatusState = newState;
+        renderStatus();
 
         boolean showReason = newState == ButtonState.UNAVAILABLE;
         reasonView.setVisibility(showReason ? VISIBLE : GONE);
@@ -102,6 +117,16 @@ public class TranslateView extends FrameLayout {
         } else {
             buttonState = newState;
         }
+    }
+
+    private void renderStatus() {
+        if (busyStatus != null) {
+            statusView.setText(busyStatus);
+            statusView.setTextColor(COLOR_NORMAL);
+            return;
+        }
+        statusView.setText(ownStatus);
+        statusView.setTextColor(statusColor(ownStatusState));
     }
 
     public void setFocused(boolean f) {
