@@ -74,7 +74,8 @@ public class EmbeddedSubtitleController {
         this.context = context;
         this.mainHandler = mainHandler;
         this.headers = headers;
-        this.cache = new SubtitleCache(new FileCacheStore(context), CachePolicy.defaults());
+        this.cache = new SubtitleCache(new FileCacheStore(context), CachePolicy.defaults(),
+                () -> SubtitleSettings.preferredLanguages(context).getTargets());
         this.session = new EmbeddedExtractionSession(
                 new Media3EmbeddedSubtitleProvider(context, headers),
                 mainHandler::post,
