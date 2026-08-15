@@ -34,6 +34,7 @@
     <string name="pref_map_dv7_off">Play UHD Blu-ray content containing Dolby Vision as is</string>
     <string name="shortcut_videos">Videos</string>
     <string name="button_open">Open</string>
+    <string name="button_subtitle">Subtitles</string>
     <string name="button_crop">Resize</string>
     <string name="button_rotate">Rotate</string>
     <string name="button_pip">Picture-in-picture</string>

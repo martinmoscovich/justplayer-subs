@@ -99,6 +99,7 @@ import com.brouken.player.skip.SkipSegment;
 import com.brouken.player.skip.SkipSegmentController;
 import com.brouken.player.skip.SkipSegmentParser;
 import com.brouken.player.subs.CustomSubtitleController;
+import com.brouken.player.subs.SubtitleSettingsActivity;
 import androidx.media3.ui.TimeBar;
 
 import com.brouken.player.dtpv.DoubleTapPlayerView;
@@ -155,7 +156,6 @@ public class PlayerActivity extends Activity {
     private static final int REQUEST_CHOOSER_VIDEO_MEDIASTORE = 20;
     private static final int REQUEST_CHOOSER_SUBTITLE_MEDIASTORE = 21;
     private static final int REQUEST_SETTINGS = 100;
-    private static final int REQUEST_SYSTEM_CAPTIONS = 200;
     public static final int CONTROLLER_TIMEOUT = 3500;
     private static final String ACTION_MEDIA_CONTROL = "media_control";
     private static final String EXTRA_CONTROL_TYPE = "control_type";
@@ -170,6 +170,7 @@ public class PlayerActivity extends Activity {
     private ImageButton buttonPiP;
     private ImageButton buttonAspectRatio;
     private ImageButton buttonRotation;
+    private ImageButton buttonSubtitle;
     private ImageButton exoSettings;
     private ImageButton exoPlayPause;
     private ProgressBar loadingProgressBar;
@@ -574,15 +575,23 @@ public class PlayerActivity extends Activity {
             return true;
         });
 
-        exoSubtitle.setOnLongClickListener(v -> {
-            enableRotation();
-            safelyStartActivityForResult(new Intent(Settings.ACTION_CAPTIONING_SETTINGS), REQUEST_SYSTEM_CAPTIONS);
-            return true;
-        });
-
-        // Subtitle button opens our manual-sync panel when a custom (external) subtitle is active.
-        exoSubtitle.setOnClickListener(v -> {
-            if (customSubtitles != null) customSubtitles.openPanel();
+        // Replaces exoSubtitle (Media3's own CC button, removed above): that one goes enabled=false
+        // internally whenever there are no text tracks, which — since this fork never uses it for
+        // native track selection anyway — meant it went dead with nothing loaded. A plain custom
+        // button has no such internal state to fight: nothing here ever calls setEnabled(false) on
+        // it, so it simply stays clickable. No long-press shortcut carried over (was: system
+        // captioning settings) — dropped for now, see PENDING.md.
+        buttonSubtitle = new ImageButton(this, null, 0, R.style.ExoStyledControls_Button_Bottom);
+        buttonSubtitle.setImageResource(R.drawable.exo_ic_subtitle_off);
+        buttonSubtitle.setId(View.generateViewId());
+        buttonSubtitle.setContentDescription(getString(R.string.button_subtitle));
+        buttonSubtitle.setOnClickListener(v -> {
+            if (customSubtitles != null) {
+                customSubtitles.openPanel();
+            } else {
+                // Nothing loaded to sync/select — the only thing worth offering is settings.
+                startActivity(new Intent(this, SubtitleSettingsActivity.class));
+            }
         });
 
         updateButtons(false);
@@ -591,7 +600,7 @@ public class PlayerActivity extends Activity {
         final LinearLayout controls = horizontalScrollView.findViewById(R.id.controls);
 
         controls.addView(buttonOpen);
-        controls.addView(exoSubtitle);
+        controls.addView(buttonSubtitle);
         controls.addView(buttonAspectRatio);
         if (Utils.isPiPSupported(this) && buttonPiP != null) {
             controls.addView(buttonPiP);
