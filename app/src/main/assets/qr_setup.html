@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Player setup</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 16px 48px;
+    font: 16px/1.4 -apple-system, Roboto, Helvetica, Arial, sans-serif;
+    background: #101418; color: #eef2f5;
+  }
+  .wrap { max-width: 480px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  .sub { color: #90a4ae; font-size: 13px; margin: 0 0 16px; }
+  .countdown {
+    position: fixed; top: 12px; right: 12px; font-variant-numeric: tabular-nums;
+    background: #1c2329; border: 1px solid #2c3742; border-radius: 8px;
+    padding: 4px 10px; font-size: 14px; color: #4dd0e1;
+  }
+  .countdown.low { color: #ff8a65; border-color: #ff8a65; }
+  fieldset { border: 1px solid #2c3742; border-radius: 10px; margin: 0 0 16px; padding: 12px 14px 16px; }
+  legend { padding: 0 6px; color: #90a4ae; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+  label { display: block; font-size: 14px; margin: 10px 0 4px; color: #cfd8dc; }
+  label:first-of-type { margin-top: 0; }
+  input[type=text], input[type=number], select {
+    width: 100%; padding: 10px 12px; font-size: 16px;
+    background: #1c2329; border: 1px solid #2c3742; border-radius: 8px; color: #eef2f5;
+  }
+  input:focus, select:focus, button:focus, li:focus { outline: 2px solid #4dd0e1; outline-offset: 1px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input { flex: 1; }
+  a.keylink { display: inline-block; margin-top: 4px; font-size: 13px; color: #4dd0e1; text-decoration: none; }
+  a.keylink:hover, a.keylink:focus { text-decoration: underline; }
+  .langs { display: flex; gap: 10px; margin-top: 4px; }
+  .langs .col { flex: 1; min-width: 0; }
+  .langs h4 { font-size: 11px; text-transform: uppercase; color: #90a4ae; margin: 0 0 4px; letter-spacing: .04em; }
+  .langs ul, .langs ol { list-style: none; margin: 0; padding: 0; max-height: 160px; overflow-y: auto;
+    border: 1px solid #2c3742; border-radius: 8px; background: #171d22; }
+  .langs li { display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    padding: 8px 10px; font-size: 14px; cursor: pointer; border-bottom: 1px solid #202830; }
+  .langs li:last-child { border-bottom: none; }
+  .langs li .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .langs li button { background: none; border: none; color: #90a4ae; font-size: 15px; padding: 2px 6px; cursor: pointer; }
+  .langs li button:hover { color: #eef2f5; }
+  .langs input[type=search] { width: 100%; margin-bottom: 6px; padding: 6px 8px; font-size: 13px; }
+  .empty { color: #607d8b; font-size: 13px; padding: 10px; }
+  details summary { cursor: pointer; color: #4dd0e1; font-size: 14px; padding: 4px 0; }
+  .checkline { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; }
+  .checkline input { width: auto; }
+  button[type=submit] {
+    width: 100%; padding: 14px; font-size: 16px; font-weight: 600; border: none; border-radius: 10px;
+    background: #4dd0e1; color: #06232a; cursor: pointer;
+  }
+  button[type=submit]:disabled { opacity: .5; }
+  .hint { color: #90a4ae; font-size: 12px; margin-top: 6px; }
+  .error { color: #ff8a65; font-size: 13px; margin-top: 10px; display: none; }
+  #status { display: none; text-align: center; padding: 60px 16px; }
+  #status .icon { font-size: 42px; margin-bottom: 12px; }
+  #status.ok { color: #7bd88f; }
+  #status.expired { color: #ff8a65; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="countdown" id="countdown">5:00</div>
+  <h1>Player setup</h1>
+  <p class="sub">Fills in your API keys and preferred languages. Blank fields keep what's already set.</p>
+
+  <form id="form">
+    <fieldset>
+      <legend>Subtitles</legend>
+      <label for="f-os-key">OpenSubtitles API key</label>
+      <input type="text" id="f-os-key" name="opensubtitles_api_key" autocomplete="off" placeholder="leave blank to keep current">
+      <a class="keylink" href="https://www.opensubtitles.com/en/consumers" target="_blank" rel="noopener">Get a key →</a>
+    </fieldset>
+
+    <fieldset>
+      <legend>Translation</legend>
+      <label for="f-ai-provider">AI provider</label>
+      <select id="f-ai-provider" name="pref_ai_provider">
+        <option value="openrouter">OpenRouter</option>
+        <option value="gemini">Gemini</option>
+      </select>
+      <a class="keylink" id="f-provider-link" href="#" target="_blank" rel="noopener">Get a key →</a>
+
+      <label for="f-ai-model">Model</label>
+      <input type="text" id="f-ai-model" name="pref_ai_model" autocomplete="off">
+
+      <label for="f-ai-key">AI API key</label>
+      <input type="text" id="f-ai-key" name="pref_ai_api_key" autocomplete="off" placeholder="leave blank to keep current">
+    </fieldset>
+
+    <fieldset>
+      <legend>Target languages</legend>
+      <p class="hint">Subtitle languages you want, in priority order.</p>
+      <div id="w-target"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Source languages</legend>
+      <p class="hint">Fallback / translate-from languages, in priority order.</p>
+      <div id="w-source"></div>
+    </fieldset>
+
+    <!--
+      Mirrors the "Sync" category of res/xml/subtitle_settings.xml plus pref_auto_select. Two UIs over
+      the same preferences, kept in sync by hand — if a field is added/renamed there, update the
+      `name=`/id here and QrSetupConfigJson.current() too. See PENDING.md §8bis.
+    -->
+    <details>
+      <summary>Advanced</summary>
+      <div class="checkline">
+        <input type="checkbox" id="f-auto-select">
+        <label for="f-auto-select" style="margin:0;">Auto-select subtitle</label>
+      </div>
+      <label for="f-reaction">Reaction time (ms)</label>
+      <input type="number" id="f-reaction" name="pref_reaction_ms">
+      <label for="f-nudge">Nudge step (ms)</label>
+      <input type="number" id="f-nudge" name="pref_nudge_ms">
+      <label for="f-seek">Seek step (s)</label>
+      <input type="number" id="f-seek" name="pref_seek_s">
+      <label for="f-gap">Segment gap (s)</label>
+      <input type="number" id="f-gap" name="pref_segment_gap_s">
+      <label for="f-restart">Prev-segment restart threshold (s)</label>
+      <input type="number" id="f-restart" name="pref_segment_restart_s">
+    </details>
+
+    <p style="margin-top:18px">
+      <button type="submit" id="submit">Update player</button>
+    </p>
+    <p class="error" id="error">Couldn't reach the player — make sure you're still on the same network and try again.</p>
+  </form>
+
+  <div id="status">
+    <div class="icon" id="status-icon"></div>
+    <div id="status-text"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var token = new URLSearchParams(location.search).get('t') || '';
+  var qs = '?t=' + encodeURIComponent(token);
+
+  var form = document.getElementById('form');
+  var submitBtn = document.getElementById('submit');
+  var errorEl = document.getElementById('error');
+  var statusEl = document.getElementById('status');
+  var countdownEl = document.getElementById('countdown');
+
+  var expiresAtMs = null;
+  var countdownTimer = null;
+
+  // --- ordered, searchable language widget --------------------------------
+
+  function createLanguageWidget(container, allLanguages, initialCodes) {
+    var nameByCode = {};
+    allLanguages.forEach(function (l) { nameByCode[l.code] = l.name; });
+
+    var selected = initialCodes.filter(function (c) { return nameByCode.hasOwnProperty(c); });
+
+    var root = document.createElement('div');
+    root.className = 'langs';
+    var availCol = document.createElement('div');
+    availCol.className = 'col';
+    var selCol = document.createElement('div');
+    selCol.className = 'col';
+    root.appendChild(availCol);
+    root.appendChild(selCol);
+    container.appendChild(root);
+
+    var search = document.createElement('input');
+    search.type = 'search';
+    search.placeholder = 'Search…';
+    availCol.appendChild(search);
+    var availHeader = document.createElement('h4');
+    availHeader.textContent = 'Available';
+    availCol.appendChild(availHeader);
+    var availList = document.createElement('ul');
+    availCol.appendChild(availList);
+
+    var selHeader = document.createElement('h4');
+    selHeader.textContent = 'Selected (priority order)';
+    selCol.appendChild(selHeader);
+    var selList = document.createElement('ol');
+    selCol.appendChild(selList);
+
+    function name(code) { return nameByCode[code] || code; }
+
+    function render() {
+      var filter = search.value.trim().toLowerCase();
+      availList.innerHTML = '';
+      var available = allLanguages.filter(function (l) { return selected.indexOf(l.code) === -1; });
+      if (filter) {
+        available = available.filter(function (l) { return l.name.toLowerCase().indexOf(filter) !== -1
+                || l.code.toLowerCase().indexOf(filter) !== -1; });
+      }
+      if (available.length === 0) {
+        var li = document.createElement('li');
+        li.className = 'empty';
+        li.textContent = filter ? 'No matches' : 'All added';
+        availList.appendChild(li);
+      }
+      available.forEach(function (l) {
+        var li = document.createElement('li');
+        li.tabIndex = 0;
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'name';
+        nameSpan.textContent = l.name;
+        li.appendChild(nameSpan);
+        var add = document.createElement('button');
+        add.type = 'button';
+        add.textContent = '+';
+        add.setAttribute('aria-label', 'Add ' + l.name);
+        li.appendChild(add);
+        function activate() { selected.push(l.code); render(); }
+        li.addEventListener('click', activate);
+        li.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } });
+        availList.appendChild(li);
+      });
+
+      selList.innerHTML = '';
+      if (selected.length === 0) {
+        var empty = document.createElement('li');
+        empty.className = 'empty';
+        empty.textContent = 'None yet — add from the left';
+        selList.appendChild(empty);
+      }
+      selected.forEach(function (code, idx) {
+        var li = document.createElement('li');
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'name';
+        nameSpan.textContent = (idx + 1) + '. ' + name(code);
+        li.appendChild(nameSpan);
+
+        var btns = document.createElement('span');
+        if (idx > 0) {
+          var up = document.createElement('button');
+          up.type = 'button'; up.textContent = '▲'; up.setAttribute('aria-label', 'Move up');
+          up.addEventListener('click', function () {
+            var tmp = selected[idx - 1]; selected[idx - 1] = selected[idx]; selected[idx] = tmp; render();
+          });
+          btns.appendChild(up);
+        }
+        if (idx < selected.length - 1) {
+          var down = document.createElement('button');
+          down.type = 'button'; down.textContent = '▼'; down.setAttribute('aria-label', 'Move down');
+          down.addEventListener('click', function () {
+            var tmp = selected[idx + 1]; selected[idx + 1] = selected[idx]; selected[idx] = tmp; render();
+          });
+          btns.appendChild(down);
+        }
+        var remove = document.createElement('button');
+        remove.type = 'button'; remove.textContent = '✕'; remove.setAttribute('aria-label', 'Remove ' + name(code));
+        remove.addEventListener('click', function () { selected.splice(idx, 1); render(); });
+        btns.appendChild(remove);
+        li.appendChild(btns);
+        selList.appendChild(li);
+      });
+    }
+
+    search.addEventListener('input', render);
+    render();
+
+    return { getSelectedCodes: function () { return selected.slice(); } };
+  }
+
+  // --- countdown, synced to the server's own deadline ----------------------
+
+  function startCountdown() {
+    function tick() {
+      var remainingMs = expiresAtMs - Date.now();
+      if (remainingMs <= 0) {
+        clearInterval(countdownTimer);
+        showExpired();
+        return;
+      }
+      var totalSec = Math.ceil(remainingMs / 1000);
+      var m = Math.floor(totalSec / 60);
+      var s = totalSec % 60;
+      countdownEl.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+      countdownEl.classList.toggle('low', totalSec <= 30);
+    }
+    tick();
+    countdownTimer = setInterval(tick, 1000);
+  }
+
+  function showExpired() {
+    form.style.display = 'none';
+    statusEl.style.display = 'block';
+    statusEl.className = 'expired';
+    document.getElementById('status-icon').textContent = '⏱';
+    document.getElementById('status-text').textContent = 'Expired — go back on the TV for a new code.';
+  }
+
+  function showSuccess() {
+    if (countdownTimer) clearInterval(countdownTimer);
+    form.style.display = 'none';
+    statusEl.style.display = 'block';
+    statusEl.className = 'ok';
+    document.getElementById('status-icon').textContent = '✓';
+    document.getElementById('status-text').textContent = 'Update successful';
+  }
+
+  // --- provider-conditional "get a key" link --------------------------------
+
+  var providerLinks = {
+    openrouter: 'https://openrouter.ai/keys',
+    gemini: 'https://aistudio.google.com/apikey'
+  };
+  function updateProviderLink() {
+    var provider = document.getElementById('f-ai-provider').value;
+    document.getElementById('f-provider-link').href = providerLinks[provider] || providerLinks.openrouter;
+  }
+  document.getElementById('f-ai-provider').addEventListener('change', updateProviderLink);
+
+  // --- load config, prefill everything non-secret ---------------------------
+
+  var targetWidget = null;
+  var sourceWidget = null;
+
+  fetch('/config.json' + qs)
+    .then(function (r) { return r.json(); })
+    .then(function (cfg) {
+      expiresAtMs = cfg.expiresAtMs;
+      startCountdown();
+
+      var current = cfg.current || {};
+      document.getElementById('f-ai-provider').value = current.aiProvider || 'openrouter';
+      updateProviderLink();
+      document.getElementById('f-ai-model').value = current.aiModel || '';
+      document.getElementById('f-auto-select').checked = !!current.autoSelect;
+      document.getElementById('f-reaction').value = current.reactionMs != null ? current.reactionMs : 200;
+      document.getElementById('f-nudge').value = current.nudgeMs != null ? current.nudgeMs : 50;
+      document.getElementById('f-seek').value = current.seekS != null ? current.seekS : 5;
+      document.getElementById('f-gap').value = current.segmentGapS != null ? current.segmentGapS : 15;
+      document.getElementById('f-restart').value = current.segmentRestartS != null ? current.segmentRestartS : 3;
+
+      var languages = cfg.languages || [];
+      targetWidget = createLanguageWidget(document.getElementById('w-target'), languages, current.targetLanguages || []);
+      sourceWidget = createLanguageWidget(document.getElementById('w-source'), languages, current.sourceLanguages || []);
+    })
+    .catch(function () {
+      errorEl.textContent = 'Could not load the current settings from the player.';
+      errorEl.style.display = 'block';
+    });
+
+  // --- submit, in place — no page navigation --------------------------------
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    errorEl.style.display = 'none';
+    submitBtn.disabled = true;
+
+    var params = new URLSearchParams();
+    ['opensubtitles_api_key', 'pref_ai_provider', 'pref_ai_model', 'pref_ai_api_key'].forEach(function (name) {
+      var el = document.getElementById({
+        opensubtitles_api_key: 'f-os-key',
+        pref_ai_provider: 'f-ai-provider',
+        pref_ai_model: 'f-ai-model',
+        pref_ai_api_key: 'f-ai-key'
+      }[name]);
+      if (el.value.trim() !== '') params.set(name, el.value.trim());
+    });
+    // Booleans and numbers are always sent explicitly — there's no meaningful "leave blank" for a
+    // checkbox or a number field that's always prefilled with the current value.
+    params.set('pref_auto_select', document.getElementById('f-auto-select').checked ? 'true' : 'false');
+    var advancedIds = {
+      pref_reaction_ms: 'f-reaction',
+      pref_nudge_ms: 'f-nudge',
+      pref_seek_s: 'f-seek',
+      pref_segment_gap_s: 'f-gap',
+      pref_segment_restart_s: 'f-restart'
+    };
+    Object.keys(advancedIds).forEach(function (name) {
+      var el = document.getElementById(advancedIds[name]);
+      if (el && el.value !== '') params.set(name, el.value);
+    });
+    if (targetWidget) params.set('pref_target_languages', targetWidget.getSelectedCodes().join(','));
+    if (sourceWidget) params.set('pref_source_languages', sourceWidget.getSelectedCodes().join(','));
+
+    fetch('/' + qs, { method: 'POST', body: params })
+      .then(function (r) {
+        if (!r.ok) throw new Error('bad status');
+        return r.json();
+      })
+      .then(function (json) {
+        if (!json.ok) throw new Error('not ok');
+        showSuccess();
+      })
+      .catch(function () {
+        submitBtn.disabled = false;
+        errorEl.style.display = 'block';
+      });
+  });
+})();
+</script>
+</body>
+</html>

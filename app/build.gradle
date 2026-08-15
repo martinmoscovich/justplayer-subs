@@ -126,4 +126,18 @@ dependencies {
         exclude group: 'com.microsoft.onnxruntime', module: 'onnxruntime'
     }
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.20.0'
+
+    // QR setup screen: a tiny local HTTP server (NanoHTTPD) and a QR encoder (ZXing core, encode-only —
+    // no camera/Android dependency needed on this side).
+    implementation 'org.nanohttpd:nanohttpd:2.3.1'
+    implementation 'com.google.zxing:core:3.5.3'
+
+    // Same JUnit 5 version subtitle-engine pins (see justplayer/gradle/libs.versions.toml), so the
+    // workspace isn't running two versions of JUnit.
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
 }

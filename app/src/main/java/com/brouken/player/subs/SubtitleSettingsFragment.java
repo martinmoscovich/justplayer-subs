@@ -26,6 +26,16 @@ public class SubtitleSettingsFragment extends PreferenceFragmentCompat {
         setPreferencesFromResource(R.xml.subtitle_settings, rootKey);
         wireLanguageEditor(SubtitleSettings.KEY_SOURCE_LANGS);
         wireLanguageEditor(SubtitleSettings.KEY_TARGET_LANGS);
+        wireQrSetup();
+    }
+
+    private void wireQrSetup() {
+        Preference p = findPreference("pref_qr_setup");
+        if (p == null) return;
+        p.setOnPreferenceClickListener(pref -> {
+            com.brouken.player.subs.qr.QrSetupActivity.start(requireContext());
+            return true;
+        });
     }
 
     private void wireLanguageEditor(String key) {
