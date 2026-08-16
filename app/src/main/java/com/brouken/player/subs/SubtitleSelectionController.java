@@ -52,6 +52,7 @@ import subtitleengine.provider.OpenSubtitlesProvider;
 import subtitleengine.provider.SubtitleProvider;
 import subtitleengine.provider.SubtitleSearchResult;
 import subtitleengine.selection.AutoSelector;
+import subtitleengine.selection.EpisodeTitleParser;
 import subtitleengine.selection.SubtitleLabelParser;
 
 /**
@@ -544,8 +545,12 @@ public class SubtitleSelectionController {
 
         new Thread(() -> {
             SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
-            ContentMetadata meta = new ContentMetadata(title, null, null, null, null, null, null, title,
-                    mediaHash, mediaBytes);
+            // Nuvio's episode title shape is "<Show> - S01E04" with no separate season/episode
+            // extra; pulling them out lets the query use OpenSubtitles' structured params instead of
+            // relying on its free-text search tolerating the suffix.
+            EpisodeTitleParser.Parsed parsed = EpisodeTitleParser.parse(title);
+            ContentMetadata meta = new ContentMetadata(parsed.title, null, parsed.season, parsed.episode,
+                    null, null, null, title, mediaHash, mediaBytes);
             try {
                 List<SubtitleSearchResult> results =
                         provider.searchByPriority(meta, langs, null, MAX_PROVIDER_RESULTS_PER_GROUP);
