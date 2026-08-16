@@ -101,6 +101,17 @@ public class TranslateView extends FrameLayout {
     public void setBusyStatus(@Nullable String busy) {
         this.busyStatus = busy;
         renderStatus();
+        // No ButtonState of its own drives the row while a blocking step (embedded extraction)
+        // runs underneath this screen — without this, "Translate" stays showing (and re-presses as
+        // "start a new run") with no way to cancel what is already in flight. Falls back to
+        // ownStatusState when the blocking step ends — same pattern as setState() below.
+        ButtonState effective = busy != null ? ButtonState.RUNNING : ownStatusState;
+        if (rowKind(effective) != rowKind(buttonState)) {
+            buttonState = effective;
+            rebuildButtons(effective);
+        } else {
+            buttonState = effective;
+        }
     }
 
     /** Pushes the current translation state. Buttons are only rebuilt (and focus reset) on a row change. */

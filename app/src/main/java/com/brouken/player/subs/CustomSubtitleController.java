@@ -205,7 +205,13 @@ public class CustomSubtitleController
                 + (selectedOption != null ? selectedOption.label + "/" + selectedOption.source : "none")
                 + " needsExtraction=" + needsExtraction());
         if (needsExtraction()) {
-            embedded.ensureExtracted(selectedOption, file -> {
+            SubtitleOption requested = selectedOption;
+            embedded.ensureExtracted(requested, file -> {
+                // The user can pick something else while a container read is still in flight
+                // (extraction has no notion of "abandoned" — it just keeps running); a stale
+                // extraction landing here must not clobber whatever is selected now, or adopt the
+                // wrong subtitle and start translating content nobody asked for anymore.
+                if (selectedOption != requested) return;
                 adoptExtractedSubtitle(file);
                 announceCacheUse();
                 translation.start(currentPositionMs());
@@ -215,7 +221,9 @@ public class CustomSubtitleController
         translation.start(currentPositionMs());
     }
 
-    @Override public void onCancelTranslate() { translation.cancel(); }
+    // Also stops a still-running extraction — onStartTranslate() can leave one in flight (see
+    // needsExtraction()/ensureExtracted() above), and without this Cancel had nothing to stop it.
+    @Override public void onCancelTranslate() { embedded.cancel(); translation.cancel(); }
 
     @Override public void onRestoreOriginal() { translation.restoreOriginal(); }
 
@@ -223,7 +231,10 @@ public class CustomSubtitleController
 
     @Override public void onStartAutoSync(boolean fromHere) {
         if (needsExtraction()) {
-            embedded.ensureExtracted(selectedOption, file -> {
+            SubtitleOption requested = selectedOption;
+            embedded.ensureExtracted(requested, file -> {
+                // Same staleness guard as onStartTranslate() — see the comment there.
+                if (selectedOption != requested) return;
                 adoptExtractedSubtitle(file);
                 announceCacheUse();
                 startAutoSync(fromHere);
@@ -273,7 +284,8 @@ public class CustomSubtitleController
         });
     }
 
-    @Override public void onCancelAutoSync() { autoSync.cancel(); }
+    // Same reasoning as onCancelTranslate(): onStartAutoSync() can leave an extraction in flight.
+    @Override public void onCancelAutoSync() { embedded.cancel(); autoSync.cancel(); }
 
     // --- SubtitleSelectionController.Listener ---
 
@@ -294,12 +306,22 @@ public class CustomSubtitleController
 
     @Override public void onOptionsChanged(List<SubtitleOption> options, @Nullable String selectedId,
                                            boolean loadingMore) {
+        SubtitleOption previous = selectedOption;
         selectedOption = null;
         if (selectedId != null) {
             for (SubtitleOption o : options) {
                 if (o.id.equals(selectedId)) { selectedOption = o; break; }
             }
         }
+        // A running extraction belongs to `previous`, not to whatever just got selected — the
+        // onStartTranslate()/onStartAutoSync() staleness guards already stop it from being adopted,
+        // but there is no reason to keep spending CPU/decode time on a result nobody will use.
+        // translation/autoSync already self-reset on the next onSubtitleLoaded()/onSubtitleCleared()
+        // (TranslationSession.setSource() -> abandon()); embedded extraction has no such hook, since
+        // selecting a new option doesn't by itself load anything for embedded tracks.
+        boolean selectionChanged = previous != selectedOption
+                && !(previous != null && selectedOption != null && previous.id.equals(selectedOption.id));
+        if (selectionChanged && embedded.isRunning()) embedded.cancel();
         translation.setExtractableSource(needsExtraction());
         translation.setCache(embedded.cache(), embedded.keyFor(selectedOption));
         panel.setOptions(options, selectedId, loadingMore);

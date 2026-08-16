@@ -188,6 +188,11 @@ public class SyncView extends FrameLayout {
     public void setBusyStatus(@Nullable String busy) {
         this.busyStatus = busy;
         emptyMessage.setText(busy != null ? busy : EMPTY_MESSAGE);
+        // The blocking step (reading an embedded track) has no Status of its own to drive the
+        // button — without this, Auto-sync still reads "Auto-sync" (and presses as "start a new
+        // one") while one is already running underneath it, with no way to cancel it.
+        buttonViews[AUTO_SYNC_INDEX].setText(
+                busy != null || (autoSyncState != null && autoSyncState.running) ? "Cancel" : "Auto-sync");
     }
 
     /** Pushes formatted auto-sync state (see {@link AutoSyncController}). A confident result opens Zone.REVIEW. */
@@ -428,7 +433,7 @@ public class SyncView extends FrameLayout {
 
     private void toggleAutoSync() {
         if (listener == null) return;
-        if (autoSyncState != null && autoSyncState.running) {
+        if (busyStatus != null || (autoSyncState != null && autoSyncState.running)) {
             listener.onCancelAutoSync();
         } else {
             autoSyncMenuIndex = 0;
