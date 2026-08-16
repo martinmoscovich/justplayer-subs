@@ -37,6 +37,7 @@ import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Base64;
 import android.util.DisplayMetrics;
+import android.util.Log;
 import android.util.Rational;
 import android.util.TypedValue;
 import android.view.InputDevice;
@@ -99,7 +100,9 @@ import com.brouken.player.skip.SkipSegment;
 import com.brouken.player.skip.SkipSegmentController;
 import com.brouken.player.skip.SkipSegmentParser;
 import com.brouken.player.subs.CustomSubtitleController;
+import com.brouken.player.subs.SubtitleSelectionController;
 import com.brouken.player.subs.SubtitleSettingsActivity;
+import subtitleengine.selection.ExternalSubtitleExtras;
 import androidx.media3.ui.TimeBar;
 
 import com.brouken.player.dtpv.DoubleTapPlayerView;
@@ -210,12 +213,16 @@ public class PlayerActivity extends Activity {
     static final String API_END_BY = "end_by";
     static final String API_HEADERS = "headers";
     static final String API_SKIP_SEGMENTS = "skip_segments";
+    /** Documented in the contract (Nuvio.md) but not otherwise read — see logIncomingMediaIntent(). */
+    static final String API_SUBS_FILENAME = "subs.filename";
     boolean apiAccess;
     boolean apiAccessPartial;
     String apiTitle;
     Map<String, String> apiHeaders = new LinkedHashMap<>();
     List<SkipSegment> apiSkipSegments = new ArrayList<>();
     List<MediaItem.SubtitleConfiguration> apiSubs = new ArrayList<>();
+    /** Same subs, before the Media3 conversion — kept for logIncomingMediaIntent() (filename/language/provider aren't otherwise recoverable from a MediaItem.SubtitleConfiguration). */
+    List<ExternalSubtitleExtras.Resolved> apiResolvedSubs = new ArrayList<>();
     boolean intentReturnResult;
     boolean playbackFinished;
 
@@ -1055,6 +1062,7 @@ public class PlayerActivity extends Activity {
         apiHeaders.clear();
         apiSkipSegments.clear();
         apiSubs.clear();
+        apiResolvedSubs.clear();
         // Otherwise a later exit would report progress for media the launcher never asked for.
         intentReturnResult = false;
         mPrefs.setPersistent(true);
@@ -1092,14 +1100,34 @@ public class PlayerActivity extends Activity {
 
             Parcelable[] subs = bundle.getParcelableArray(API_SUBS);
             String[] subsName = bundle.getStringArray(API_SUBS_NAME);
+            String[] subsFilename = bundle.getStringArray(API_SUBS_FILENAME);
             if (subs != null && subs.length > 0) {
+                // Bundle -> plain (uri, name, filename, default) tuples; dedup and label-parsing are
+                // launcher-contract logic (see Nuvio.md), not Android glue, so they live in the engine.
+                List<ExternalSubtitleExtras.Raw> rawSubs = new ArrayList<>();
                 for (int i = 0; i < subs.length; i++) {
                     Uri sub = (Uri) subs[i];
-                    String name = null;
-                    if (subsName != null && subsName.length > i) {
-                        name = subsName[i];
+                    String name = subsName != null && subsName.length > i ? subsName[i] : null;
+                    String filename = subsFilename != null && subsFilename.length > i ? subsFilename[i] : null;
+                    rawSubs.add(new ExternalSubtitleExtras.Raw(sub.toString(), name, filename, sub.equals(defaultSub)));
+                }
+                apiResolvedSubs = ExternalSubtitleExtras.resolve(rawSubs);
+
+                for (ExternalSubtitleExtras.Resolved r : apiResolvedSubs) {
+                    MediaItem.SubtitleConfiguration config =
+                            SubtitleUtils.buildSubtitle(this, Uri.parse(r.uri), r.name, r.isDefault);
+                    // buildSubtitle() already tries a <video>.<lang>.srt filename pattern; that never
+                    // matches a launcher's content:// URI, so fall back to what the engine parsed from
+                    // the label ("Spanish - OpenSubtitles v3" — no separate language extra exists).
+                    MediaItem.SubtitleConfiguration.Builder builder = config.buildUpon()
+                            // Media3 echoes sideloaded subs back as ordinary text tracks in
+                            // player.getCurrentTracks(), indistinguishable from real embedded ones;
+                            // this id lets SubtitleSelectionController tell them apart.
+                            .setId(SubtitleSelectionController.EXTERNAL_TRACK_ID_PREFIX + r.uri);
+                    if (config.language == null && r.languageCode != null) {
+                        builder.setLanguage(r.languageCode);
                     }
-                    apiSubs.add(SubtitleUtils.buildSubtitle(this, sub, name, sub.equals(defaultSub)));
+                    apiSubs.add(builder.build());
                 }
             }
         }
@@ -1114,6 +1142,73 @@ public class PlayerActivity extends Activity {
             if (bundle.containsKey(API_POSITION)) {
                 mPrefs.updatePosition((long) bundle.getInt(API_POSITION));
             }
+        }
+
+        logIncomingMediaIntent(uri, type, bundle);
+    }
+
+    /**
+     * What a launcher (Nuvio et al.) actually sent — see {@code Nuvio.md} for the contract. Header
+     * *values* are never logged: they can carry debrid/auth tokens, and this ends up in adb logcat
+     * (and from there, easily pasted into chat) — only which header keys were present.
+     */
+    private void logIncomingMediaIntent(final Uri uri, final String type, final Bundle bundle) {
+        if (bundle == null) {
+            Log.i("MediaIntent", "uri=" + uri + " type=" + type + " (no extras)");
+            return;
+        }
+        try {
+            org.json.JSONObject json = new org.json.JSONObject();
+            json.put("uri", String.valueOf(uri));
+            json.put("type", type);
+            json.put("title", apiTitle);
+            json.put("positionMs", bundle.containsKey(API_POSITION) ? bundle.getInt(API_POSITION) : org.json.JSONObject.NULL);
+            json.put("returnResult", intentReturnResult);
+            json.put("apiAccess", apiAccess);
+            json.put("apiAccessPartial", apiAccessPartial);
+            json.put("headerKeys", new org.json.JSONArray(apiHeaders.keySet()));
+            json.put("allExtraKeys", new org.json.JSONArray(bundle.keySet()));
+
+            // apiResolvedSubs is already deduped + label-parsed by the engine (ExternalSubtitleExtras)
+            // — this is exactly what ended up in apiSubs, just before the Media3 conversion, which is
+            // why it's the one used here instead of re-deriving anything from the raw bundle arrays.
+            org.json.JSONArray subs = new org.json.JSONArray();
+            for (ExternalSubtitleExtras.Resolved r : apiResolvedSubs) {
+                org.json.JSONObject s = new org.json.JSONObject();
+                s.put("uri", r.uri);
+                s.put("name", r.name);
+                s.put("filename", r.filename == null ? org.json.JSONObject.NULL : r.filename);
+                s.put("default", r.isDefault);
+                s.put("languageCode", r.languageCode == null ? org.json.JSONObject.NULL : r.languageCode);
+                s.put("provider", r.provider == null ? org.json.JSONObject.NULL : r.provider);
+                subs.put(s);
+            }
+            json.put("subs", subs);
+
+            org.json.JSONArray skip = new org.json.JSONArray();
+            for (SkipSegment seg : apiSkipSegments) {
+                org.json.JSONObject s = new org.json.JSONObject();
+                s.put("kind", seg.getKind().name());
+                s.put("startMs", seg.getStartMs());
+                s.put("endMs", seg.getEndMs());
+                skip.put(s);
+            }
+            json.put("skipSegments", skip);
+
+            // Our own SkipSegment only keeps kind/start/end — this is every field Nuvio actually put
+            // in the extra (e.g. a possible "provider"), in case our model is quietly dropping one.
+            String rawSkipSegments = bundle.getString(API_SKIP_SEGMENTS);
+            if (rawSkipSegments != null) {
+                try {
+                    json.put("rawSkipSegments", new org.json.JSONArray(rawSkipSegments));
+                } catch (org.json.JSONException e) {
+                    json.put("rawSkipSegments", rawSkipSegments); // wasn't a JSON array — show it verbatim
+                }
+            }
+
+            Log.i("MediaIntent", json.toString(2));
+        } catch (org.json.JSONException e) {
+            Log.w("MediaIntent", "failed to serialize incoming intent", e);
         }
     }
 
