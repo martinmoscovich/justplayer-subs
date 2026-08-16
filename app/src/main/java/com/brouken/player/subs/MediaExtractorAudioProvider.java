@@ -73,6 +73,14 @@ public class MediaExtractorAudioProvider implements AudioProvider {
     private final Context context;
     @Nullable private final Map<String, String> headers;
 
+    /** See {@link AudioProvider#extractAudioSegment} — thrown instead of returning null when we can
+     *  name the reason. Unchecked: {@link AudioProvider}'s signature declares no checked exceptions. */
+    private static final class UnsupportedAudioTrackException extends RuntimeException {
+        UnsupportedAudioTrackException(String message) {
+            super(message);
+        }
+    }
+
     public MediaExtractorAudioProvider(Context context, @Nullable Map<String, String> headers) {
         this.context = context.getApplicationContext();
         this.headers = headers;
@@ -96,7 +104,13 @@ public class MediaExtractorAudioProvider implements AudioProvider {
             }
             if (audioTrackIndex < 0) {
                 Log.w(TAG, "extractAudioSegment: no audio track found in " + describe(source));
-                return null;
+                // Most commonly a codec Android's native MediaExtractor can't demux at all (DTS,
+                // TrueHD, …) — it drops the track silently rather than reporting it as unsupported,
+                // so this is our best diagnosis, not a certainty. Playback itself can still work
+                // because Media3 decodes via its own extractor + FFmpeg extension instead of this API.
+                throw new UnsupportedAudioTrackException(
+                        "No supported audio track found for auto-sync — the audio codec may not be "
+                                + "supported for extraction (e.g. DTS, TrueHD)");
             }
 
             extractor.selectTrack(audioTrackIndex);
@@ -127,6 +141,8 @@ public class MediaExtractorAudioProvider implements AudioProvider {
                 onProgress.onProgress(ResyncProgressListener.Phase.EXTRACTING, 1.0);
             }
             return result;
+        } catch (UnsupportedAudioTrackException e) {
+            throw e; // has a specific, user-facing reason — let it propagate instead of collapsing to null
         } catch (Exception e) {
             Log.e(TAG, "extractAudioSegment: failed for " + describe(source), e);
             return null;
