@@ -101,8 +101,15 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
         }
     }
 
+    /** Media3's own default (8s) is tuned for a single request, not walking a remote container
+     *  through a slow debrid mirror — real-world timeouts observed at 0% progress well before 8s
+     *  worth of data could plausibly have arrived. */
+    private static final int HTTP_TIMEOUT_MS = 30_000;
+
     private DataSource buildDataSource() {
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+                .setConnectTimeoutMs(HTTP_TIMEOUT_MS)
+                .setReadTimeoutMs(HTTP_TIMEOUT_MS)
                 // Debrid links redirect between http and https; without this the read dies on the
                 // first redirect while playback (which sets it elsewhere) carries on fine.
                 .setAllowCrossProtocolRedirects(true);
