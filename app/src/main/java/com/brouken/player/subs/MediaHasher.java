@@ -31,6 +31,12 @@ import subtitleengine.provider.OpenSubtitlesHash;
 public final class MediaHasher {
 
     private static final String TAG = "MediaHasher";
+    // Media3's default (8s) is too short for slow debrid mirrors — same fix as
+    // Media3EmbeddedSubtitleProvider's HTTP_TIMEOUT_MS, and the same failure mode: a timeout here
+    // doesn't just fail silently, it drops the cache key entirely (hash() returns null), so every
+    // later extraction/translation for this media runs uncached even when a prior run already
+    // cached its result under the real hash.
+    private static final int HTTP_TIMEOUT_MS = 30_000;
 
     private MediaHasher() {
     }
@@ -96,7 +102,9 @@ public final class MediaHasher {
 
     private static DataSource build(Context context, @Nullable Map<String, String> headers) {
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setAllowCrossProtocolRedirects(true);
+                .setAllowCrossProtocolRedirects(true)
+                .setConnectTimeoutMs(HTTP_TIMEOUT_MS)
+                .setReadTimeoutMs(HTTP_TIMEOUT_MS);
         if (headers != null && !headers.isEmpty()) http.setDefaultRequestProperties(headers);
         return new DefaultDataSource.Factory(context, http).createDataSource();
     }
