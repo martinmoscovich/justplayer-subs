@@ -479,7 +479,13 @@ public class SubtitleSelectorView extends LinearLayout {
 
     private String metaText(SubtitleOption o) {
         StringBuilder sb = new StringBuilder();
-        if (o.rating > 0) sb.append("★").append(String.format(Locale.ROOT, "%.1f", o.rating));
+        // Only ever set when a sibling option shares this one's label (see SubtitleOption.format) —
+        // e.g. the same provider/language offered as both .srt and .vtt.
+        if (o.format != null) sb.append(o.format);
+        if (o.rating > 0) {
+            if (sb.length() > 0) sb.append("  ");
+            sb.append("★").append(String.format(Locale.ROOT, "%.1f", o.rating));
+        }
         if (o.downloadCount > 0) {
             if (sb.length() > 0) sb.append("  ");
             sb.append("⬇").append(String.format(Locale.ROOT, "%,d", o.downloadCount));

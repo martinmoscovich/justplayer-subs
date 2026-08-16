@@ -42,11 +42,15 @@ public class SubtitleOption {
      *  ever load text externally. The auto-selector needs it: an image track can be displayed but
      *  never parsed, resynced or translated, so the engine ranks it last. */
     public final boolean imageFormat;
+    /** EXTERNAL: short file-format tag ("SRT", "VTT", …), set only when another option in the same
+     *  list shares this one's label — e.g. the same provider offering both .srt and .vtt for the
+     *  same language. Null otherwise: with nothing to disambiguate, showing it would just be noise. */
+    @Nullable public final String format;
 
     private SubtitleOption(String id, String label, @Nullable String language, Source source,
                            State state, @Nullable Uri uri, int embeddedTextIndex,
                            @Nullable String providerRef, float rating, int downloadCount,
-                           boolean imageFormat) {
+                           boolean imageFormat, @Nullable String format) {
         this.id = id;
         this.label = label;
         this.language = language;
@@ -58,22 +62,25 @@ public class SubtitleOption {
         this.rating = rating;
         this.downloadCount = downloadCount;
         this.imageFormat = imageFormat;
+        this.format = format;
     }
 
-    public static SubtitleOption external(String id, String label, @Nullable String language, Uri uri) {
-        return new SubtitleOption(id, label, language, Source.EXTERNAL, State.READY, uri, -1, null, 0f, 0, false);
+    public static SubtitleOption external(String id, String label, @Nullable String language, Uri uri,
+                                          @Nullable String format) {
+        return new SubtitleOption(id, label, language, Source.EXTERNAL, State.READY, uri, -1, null, 0f, 0, false,
+                format);
     }
 
     public static SubtitleOption embedded(String id, String label, @Nullable String language, int textIndex,
                                           boolean imageFormat) {
         return new SubtitleOption(id, label, language, Source.EMBEDDED, State.READY, null, textIndex, null, 0f, 0,
-                imageFormat);
+                imageFormat, null);
     }
 
     public static SubtitleOption provider(String id, String label, @Nullable String language, String providerRef,
                                           float rating, int downloadCount) {
         return new SubtitleOption(id, label, language, Source.PROVIDER, State.READY, null, -1, providerRef,
-                rating, downloadCount, false);
+                rating, downloadCount, false, null);
     }
 
     public boolean isReady() {

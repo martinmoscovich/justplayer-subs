@@ -27,9 +27,11 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 import okhttp3.OkHttpClient;
@@ -50,6 +52,7 @@ import subtitleengine.provider.OpenSubtitlesProvider;
 import subtitleengine.provider.SubtitleProvider;
 import subtitleengine.provider.SubtitleSearchResult;
 import subtitleengine.selection.AutoSelector;
+import subtitleengine.selection.SubtitleLabelParser;
 
 /**
  * The selection concern: builds and owns the list of selectable subtitles (external via intent or a
@@ -73,6 +76,20 @@ public class SubtitleSelectionController {
 
     private static final String TAG = "SubtitleSelection";
 
+    /**
+     * {@code Format.id} marker the host must set (via {@code SubtitleConfiguration.buildUpon()
+     * .setId(...)}) on every external subtitle it feeds into the player's {@code MediaItem}. Media3
+     * reports sideloaded subtitles as regular text tracks in {@code player.getCurrentTracks()}
+     * alongside genuinely container-embedded ones — indistinguishable by type — so
+     * {@link #rebuildEmbeddedOptions} needs this marker to tell "real embedded track" apart from
+     * "one of our own external subs echoed back," or every external ends up duplicated as embedded.
+     *
+     * <p>Media3 rewrites the id we set into {@code "<sourceIndex>:" + ourId} on the {@code Format} it
+     * exposes in {@code Tracks} (e.g. {@code "1:ext:content://..."}), so matching must use
+     * {@code contains}, not {@code startsWith}.
+     */
+    public static final String EXTERNAL_TRACK_ID_PREFIX = "ext:";
+
     public interface Listener {
         void onSubtitleLoaded(SubtitleFile file);
         void onSubtitleCleared();
@@ -92,7 +109,9 @@ public class SubtitleSelectionController {
     private final Listener listener;
     private final Handler mainHandler;
 
-    private static final int MAX_PROVIDER_RESULTS = 12;
+    /** Per language-group cap (target results and source results each get up to this many), not a
+     *  cap on the combined list — see {@link SubtitleProvider#searchByPriority}. */
+    private static final int MAX_PROVIDER_RESULTS_PER_GROUP = 12;
 
     private final List<SubtitleOption> externalOptions = new ArrayList<>();
     private final List<SubtitleOption> embeddedOptions = new ArrayList<>();
@@ -356,18 +375,59 @@ public class SubtitleSelectionController {
                                       @Nullable Uri prefsSubtitleUri, @Nullable Uri mediaUri) {
         externalOptions.clear();
         if (apiSubs != null && !apiSubs.isEmpty()) {
+            String[] labels = new String[apiSubs.size()];
+            String[] formats = new String[apiSubs.size()];
+            Map<String, Integer> labelCounts = new HashMap<>();
             for (int i = 0; i < apiSubs.size(); i++) {
                 MediaItem.SubtitleConfiguration c = apiSubs.get(i);
-                String lang = c.language;
-                String labelText = c.label != null ? c.label : (lang != null ? lang : "External " + (i + 1));
-                externalOptions.add(SubtitleOption.external("ext" + i, labelText, lang, c.uri));
+                labels[i] = externalDisplayLabel(c, i);
+                formats[i] = subtitleFormatLabel(c.mimeType);
+                labelCounts.merge(labels[i], 1, Integer::sum);
+            }
+            for (int i = 0; i < apiSubs.size(); i++) {
+                MediaItem.SubtitleConfiguration c = apiSubs.get(i);
+                // Only disambiguate when the label repeats (e.g. a provider offering the same
+                // language as both .srt and .vtt) — a single result never needs its format called out.
+                String format = labelCounts.get(labels[i]) > 1 ? formats[i] : null;
+                externalOptions.add(SubtitleOption.external("ext" + i, labels[i], c.language, c.uri, format));
             }
             return;
         }
         Uri single = prefsSubtitleUri != null ? prefsSubtitleUri : sidecarCandidate(mediaUri);
         if (single != null) {
-            externalOptions.add(SubtitleOption.external("ext0", "External", null, single));
+            externalOptions.add(SubtitleOption.external("ext0", "External", null, single, null));
         }
+    }
+
+    /** "ES - OpenSubtitles": same {@code <CODE> - <Provider>} convention the PROVIDER source already
+     *  uses (see {@link #onProviderResults}), instead of Nuvio's raw free-text label ("Spanish -
+     *  OpenSubtitles v3"). Re-parses the label with {@link SubtitleLabelParser} rather than reusing
+     *  {@code ExternalSubtitleExtras.Resolved} — this is a display-formatting choice specific to this
+     *  UI, not launcher-contract logic, so it stays out of the engine (unlike the parsing itself). Falls
+     *  back to the raw label, then the language code alone, when either half can't be identified.
+     */
+    private static String externalDisplayLabel(MediaItem.SubtitleConfiguration c, int index) {
+        SubtitleLabelParser.Parsed parsed = SubtitleLabelParser.parse(c.label);
+        String lang = c.language != null ? c.language : parsed.languageCode;
+        if (lang != null && parsed.provider != null) {
+            return lang.toUpperCase(Locale.ROOT) + " - " + parsed.provider;
+        }
+        if (c.label != null) return c.label;
+        if (lang != null) return lang;
+        return "External " + (index + 1);
+    }
+
+    /** Short display tag for the format chip — derived from the same mimeType SubtitleUtils.buildSubtitle()
+     *  already computes from the URI extension (reliable; unlike Nuvio's {@code filename} extra, which
+     *  we've seen say ".srt" even when the URI itself ends in ".vtt"). */
+    @Nullable
+    private static String subtitleFormatLabel(@Nullable String mimeType) {
+        if (mimeType == null) return null;
+        if (mimeType.equals(MimeTypes.TEXT_VTT)) return "VTT";
+        if (mimeType.equals(MimeTypes.TEXT_SSA)) return "SSA";
+        if (mimeType.equals(MimeTypes.APPLICATION_TTML)) return "TTML";
+        if (mimeType.equals(MimeTypes.APPLICATION_SUBRIP)) return "SRT";
+        return null;
     }
 
     private void rebuildEmbeddedOptions(@Nullable Tracks tracks) {
@@ -377,6 +437,8 @@ public class SubtitleSelectionController {
             for (Tracks.Group g : tracks.getGroups()) {
                 if (g.getType() != C.TRACK_TYPE_TEXT) continue;
                 Format f = g.getTrackFormat(0);
+                // Not a real embedded track — one of our own external subs, echoed back by Media3.
+                if (f.id != null && f.id.contains(EXTERNAL_TRACK_ID_PREFIX)) continue;
                 String lang = f.language;
                 String labelText = f.label != null ? f.label : (lang != null ? lang : "Embedded " + (ti + 1));
                 found.add(SubtitleOption.embedded("emb" + ti, labelText + " (embedded)", lang, ti,
@@ -485,7 +547,8 @@ public class SubtitleSelectionController {
             ContentMetadata meta = new ContentMetadata(title, null, null, null, null, null, null, title,
                     mediaHash, mediaBytes);
             try {
-                List<SubtitleSearchResult> results = provider.searchByPriority(meta, langs, null);
+                List<SubtitleSearchResult> results =
+                        provider.searchByPriority(meta, langs, null, MAX_PROVIDER_RESULTS_PER_GROUP);
                 mainHandler.post(() -> onProviderResults(results));
             } catch (Exception e) {
                 mainHandler.post(() -> onProviderError(e));
@@ -495,9 +558,8 @@ public class SubtitleSelectionController {
 
     private void onProviderResults(List<SubtitleSearchResult> results) {
         providerOptions.clear();
-        int n = 0;
+        // Already bounded per group (target/source) by searchByPriority — no further cap needed here.
         for (SubtitleSearchResult r : results) {
-            if (n++ >= MAX_PROVIDER_RESULTS) break;
             String lang = r.getLanguage() != null ? r.getLanguage().toUpperCase(Locale.ROOT) : "?";
             String label = lang + " · " + r.getProviderName();
             providerOptions.add(SubtitleOption.provider(
@@ -568,6 +630,9 @@ public class SubtitleSelectionController {
         int ti = 0;
         for (Tracks.Group g : tracks.getGroups()) {
             if (g.getType() != C.TRACK_TYPE_TEXT) continue;
+            // Must skip the same entries rebuildEmbeddedOptions() does, or embeddedTextIndex points
+            // at the wrong track whenever an external sub sits before/between real embedded ones.
+            if (g.getTrackFormat(0).id != null && g.getTrackFormat(0).id.contains(EXTERNAL_TRACK_ID_PREFIX)) continue;
             if (ti == opt.embeddedTextIndex) {
                 trackSelector.setParameters(trackSelector.buildUponParameters()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
