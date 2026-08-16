@@ -43,6 +43,11 @@ public class SubtitlePanel extends FrameLayout
         void onTranslateAgain();
         void onStartAutoSync(boolean fromHere);
         void onCancelAutoSync();
+        /** The Sync screen just stopped being what's shown — either another screen took over, or the
+         *  whole panel closed while Sync was up. Fires on the same "hover previews the screen" model
+         *  as everything else here: moving the sidebar highlight off Sync counts, same as committing
+         *  to it does, since that's already what changes what's rendered. */
+        void onLeavingSync();
     }
 
     private enum Screen { SELECT, SYNC, TRANSLATE }
@@ -153,7 +158,7 @@ public class SubtitlePanel extends FrameLayout
 
     private void openOn(Screen target) {
         setVisibility(VISIBLE);
-        screen = target;
+        changeScreen(target);
         sidebarIndex = target.ordinal();
         syncView.reset();
         translateView.reset();
@@ -162,7 +167,17 @@ public class SubtitlePanel extends FrameLayout
     }
 
     public void close() {
+        if (screen == Screen.SYNC && callbacks != null) callbacks.onLeavingSync();
         setVisibility(GONE);
+    }
+
+    /** The one place {@link #screen} is allowed to change — so leaving Sync is never missed
+     *  regardless of which of the three call sites (open, sidebar preview, close) caused it. */
+    private void changeScreen(Screen next) {
+        if (screen == Screen.SYNC && next != Screen.SYNC && callbacks != null) {
+            callbacks.onLeavingSync();
+        }
+        screen = next;
     }
 
     public void onTick(long positionMs) {
@@ -214,7 +229,7 @@ public class SubtitlePanel extends FrameLayout
     /** Reflects the highlighted sidebar item into the content screen (live preview). */
     private void applySidebar() {
         if (sidebarIndex < SCREENS.length) {
-            screen = SCREENS[sidebarIndex];
+            changeScreen(SCREENS[sidebarIndex]);
             showScreen();
         }
         styleSidebar();

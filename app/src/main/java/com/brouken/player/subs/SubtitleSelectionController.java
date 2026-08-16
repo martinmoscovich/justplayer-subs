@@ -128,6 +128,12 @@ public class SubtitleSelectionController {
      *  external/provider download can still fail), not when it is chosen. */
     @Nullable private String pendingAutoNoticeId;
     private boolean pendingAutoNoticePreferred;
+    /** Only the first preferred-language pick gets a "found!" notice. Candidates keep arriving after
+     *  the first one (embedded, then external subs, then provider results), and the resolver keeps
+     *  upgrading to a better source in the same language — a real improvement, but not something
+     *  worth a second near-identical toast; three "Spanish subtitle found!" popups in a row read as
+     *  a bug, not as three separate good-news events. */
+    private boolean notifiedPreferredFound = false;
     @Nullable private String mediaHash;
     @Nullable private String mediaBytes;
     @Nullable private SubtitleCache cache;
@@ -147,6 +153,7 @@ public class SubtitleSelectionController {
                            @Nullable Uri prefsSubtitleUri) {
         manuallySelected = false;
         pendingAutoNoticeId = null;
+        notifiedPreferredFound = false;
         selectedId = null;
         mediaHash = null;
         mediaBytes = null;
@@ -304,8 +311,11 @@ public class SubtitleSelectionController {
         android.util.Log.i(TAG, "auto-selected '" + winner.label + "' (" + winner.source + ", lang="
                 + winner.language + ", preferred=" + decision.preferredLanguage + ") over "
                 + (selectedId != null ? selectedId : "nothing"));
-        pendingAutoNoticeId = winner.id;
-        pendingAutoNoticePreferred = decision.preferredLanguage;
+        // Still auto-selects the better source — only the repeat notice is suppressed.
+        if (!(decision.preferredLanguage && notifiedPreferredFound)) {
+            pendingAutoNoticeId = winner.id;
+            pendingAutoNoticePreferred = decision.preferredLanguage;
+        }
         applySelection(winner.id);
     }
 
@@ -347,6 +357,7 @@ public class SubtitleSelectionController {
     private void notifyAutoSelected(SubtitleOption opt) {
         if (pendingAutoNoticeId == null || !pendingAutoNoticeId.equals(opt.id)) return;
         pendingAutoNoticeId = null;
+        if (pendingAutoNoticePreferred) notifiedPreferredFound = true;
         listener.onAutoSelected(opt, pendingAutoNoticePreferred);
     }
 
@@ -360,7 +371,9 @@ public class SubtitleSelectionController {
         return all;
     }
 
-    private void refresh() {
+    /** Re-pushes the option list as-is — e.g. after something outside this class (a translation
+     *  cache entry being written or forgotten) changed what a chip should show. */
+    public void refresh() {
         listener.onOptionsChanged(allOptions(), selectedId, loadingMore);
     }
 

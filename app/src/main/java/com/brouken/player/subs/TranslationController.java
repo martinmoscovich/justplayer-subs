@@ -60,6 +60,9 @@ public class TranslationController implements TranslationSession.Listener {
         this.sync = sync;
         this.panel = panel;
         this.renderOverlay = renderOverlay;
+        // The engine's pricing cache defaults to ~/.subtitle-engine, which doesn't resolve to
+        // anything writable on Android (see LESSONS.md) — point it at real app storage instead.
+        SubtitleTranslator.setPricingCacheDir(context.getFilesDir());
         SubtitleTranslator translator = new SubtitleTranslator(buildClient(context));
         this.session = new TranslationSession(translator, mainHandler::post, this);
 
@@ -178,6 +181,12 @@ public class TranslationController implements TranslationSession.Listener {
         session.restoreOriginal();
     }
 
+    /** Drops the cached translation for the current target language — see the caller
+     *  ({@link CustomSubtitleController#onRestoreOriginal}) for why "Restore Original" does this. */
+    public void forgetCachedTranslation() {
+        session.forgetTranslation(targetLanguage());
+    }
+
     public void release() {
         // Teardown, not a rejection: whatever chunks were already paid for stay cached.
         session.abandon();
@@ -223,7 +232,9 @@ public class TranslationController implements TranslationSession.Listener {
         return !TextUtils.isEmpty(SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_API_KEY, null));
     }
 
-    private String targetLanguage() {
+    /** Package-visible: {@link CustomSubtitleController} needs this to check the translation cache
+     *  for the "Translated" chip without duplicating the target-language fallback logic. */
+    String targetLanguage() {
         List<String> targets = SubtitleSettings.getLanguageList(context, SubtitleSettings.KEY_TARGET_LANGS);
         if (!targets.isEmpty()) return targets.get(0);
         String dev = Locale.getDefault().getLanguage();

@@ -16,7 +16,9 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 
 import java.util.List;
 
+import subtitleengine.cache.SubtitleCache;
 import subtitleengine.core.model.SubtitleFile;
+import subtitleengine.sync.SyncState;
 
 /**
  * Coordinator that wires the two subtitle concerns to the player. It owns the
@@ -225,7 +227,14 @@ public class CustomSubtitleController
     // needsExtraction()/ensureExtracted() above), and without this Cancel had nothing to stop it.
     @Override public void onCancelTranslate() { embedded.cancel(); translation.cancel(); }
 
-    @Override public void onRestoreOriginal() { translation.restoreOriginal(); }
+    // Discards the cached translation too — "Restore Original" reading as final, not as "hide it for
+    // now": leaving a translated chip on screen after explicitly asking for the original back would
+    // be misleading, and translateAgain()/re-selecting always pays to translate fresh either way.
+    @Override public void onRestoreOriginal() {
+        translation.forgetCachedTranslation();
+        translation.restoreOriginal();
+        selection.refresh(); // the "Translated" chip needs the option list re-evaluated to drop
+    }
 
     @Override public void onTranslateAgain() { translation.translateAgain(currentPositionMs()); }
 
@@ -287,13 +296,46 @@ public class CustomSubtitleController
     // Same reasoning as onCancelTranslate(): onStartAutoSync() can leave an extraction in flight.
     @Override public void onCancelAutoSync() { embedded.cancel(); autoSync.cancel(); }
 
+    /**
+     * The Sync screen stopped being shown (see {@link SubtitlePanel.Callbacks#onLeavingSync}) —
+     * save or clear the manual-sync state for whatever is selected, per the delay-back-to-0 rule:
+     * empty state (no anchors, nudge 0) means "clear it", anything else means "save it", and neither
+     * happens if it already matches what's stored (no point rewriting the same bytes every time the
+     * user glances at another screen and back).
+     */
+    @Override public void onLeavingSync() {
+        if (selectedOption == null) return;
+        String key = embedded.keyFor(selectedOption);
+        if (key == null) return;
+        SyncState current = sync.getSession().state();
+        SubtitleCache cache = embedded.cache();
+        if (current.equals(SyncState.empty())) {
+            cache.removeSyncState(key); // no-op if nothing was stored
+        } else if (!current.equals(cache.getSyncState(key))) {
+            cache.putSyncState(key, current);
+        }
+        selection.refresh(); // "Synced" chip
+    }
+
     // --- SubtitleSelectionController.Listener ---
 
     @Override public void onSubtitleLoaded(SubtitleFile file) {
         sync.setSubtitle(file);
+        if (selectedOption != null) {
+            String key = embedded.keyFor(selectedOption);
+            SyncState saved = key != null ? embedded.cache().getSyncState(key) : null;
+            if (saved != null) sync.getSession().restoreState(saved);
+        }
         panel.setSyncSession(sync.getSession());
         translation.setSource(file, selection.mediaTitle());
         autoSync.setSource(file, mediaUri);
+        // The "Translated" chip means exactly this: a cache hit is waiting, and it's free to load —
+        // show it instead of the original, same reasoning as adopting a cached extraction on select.
+        // Applies to every source (embedded/external/provider) alike, since they all funnel through
+        // this same callback once their cues are actually available.
+        if (selectedOption != null && selectedOption.translated) {
+            translation.start(currentPositionMs());
+        }
         renderOverlay();
     }
 
@@ -322,9 +364,37 @@ public class CustomSubtitleController
         boolean selectionChanged = previous != selectedOption
                 && !(previous != null && selectedOption != null && previous.id.equals(selectedOption.id));
         if (selectionChanged && embedded.isRunning()) embedded.cancel();
+        // A disk cache hit is effectively free — adopt it the moment the track is selected, so Sync
+        // has cues to work with right away instead of sitting empty until the user happens to press
+        // Translate/Auto-sync (the only thing that otherwise triggers ensureExtracted()).
+        if (selectionChanged) {
+            SubtitleFile cached = embedded.tryCached(selectedOption);
+            if (cached != null) {
+                adoptExtractedSubtitle(cached);
+                announceCacheUse();
+            }
+        }
         translation.setExtractableSource(needsExtraction());
         translation.setCache(embedded.cache(), embedded.keyFor(selectedOption));
+        markCacheStatus(options);
         panel.setOptions(options, selectedId, loadingMore);
+    }
+
+    /**
+     * "Extracted"/"Translated"/"Synced" chips (see {@link SubtitleSelectorView}) — a plain cache
+     * lookup per option, not a session-only flag, so a track cached in an earlier session shows the
+     * same chip the moment its row is built, before the user has touched anything this run.
+     */
+    private void markCacheStatus(List<SubtitleOption> options) {
+        String targetLanguage = translation.targetLanguage();
+        long now = System.currentTimeMillis();
+        SubtitleCache cache = embedded.cache();
+        for (SubtitleOption o : options) {
+            o.extracted = o.source == SubtitleOption.Source.EMBEDDED && embedded.isCached(o);
+            String key = embedded.keyFor(o);
+            o.translated = key != null && cache.getTranslation(key, targetLanguage, now) != null;
+            o.synced = key != null && cache.getSyncState(key) != null;
+        }
     }
 
     /**

@@ -482,6 +482,21 @@ public class SubtitleSelectorView extends LinearLayout {
         // Only ever set when a sibling option shares this one's label (see SubtitleOption.format) —
         // e.g. the same provider/language offered as both .srt and .vtt.
         if (o.format != null) sb.append(o.format);
+        // Translated implies extracted (translating an embedded track needs its cues first) — show
+        // only the higher one, not both stacked.
+        if (o.translated) {
+            if (sb.length() > 0) sb.append("  ");
+            sb.append("Translated");
+        } else if (o.extracted) {
+            if (sb.length() > 0) sb.append("  ");
+            sb.append("Extracted");
+        }
+        // Independent of the chip above — syncing and translating are unrelated actions on the same
+        // subtitle, so both can show together.
+        if (o.synced) {
+            if (sb.length() > 0) sb.append("  ");
+            sb.append("Synced");
+        }
         if (o.rating > 0) {
             if (sb.length() > 0) sb.append("  ");
             sb.append("★").append(String.format(Locale.ROOT, "%.1f", o.rating));

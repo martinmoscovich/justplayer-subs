@@ -27,6 +27,16 @@ public class SubtitleOption {
     public State state;
     /** Set when this option's cues came off the cache rather than the network — the UI says so. */
     public boolean fromCache;
+    /** Whether this option's cues are already on disk — set by whoever owns that cache
+     *  ({@link EmbeddedSubtitleController} for embedded tracks) after the option list is built,
+     *  same as {@link #fromCache}. {@link #translated} implies this (translating needs the cues
+     *  first) but the UI shows only the higher one — see {@link SubtitleSelectorView}. */
+    public boolean extracted;
+    /** Whether a translation into the current target language is already cached for this option. */
+    public boolean translated;
+    /** Whether a manual-sync adjustment (anchors/nudge) is saved for this option — independent of
+     *  {@link #translated}: syncing and translating are unrelated actions on the same subtitle. */
+    public boolean synced;
 
     /** EXTERNAL: the subtitle URI. */
     @Nullable public final Uri uri;

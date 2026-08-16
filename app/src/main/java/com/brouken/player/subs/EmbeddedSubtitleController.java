@@ -107,10 +107,14 @@ public class EmbeddedSubtitleController {
         // Hashing costs two range requests, so it happens off the main thread — and its absence
         // simply means this media runs uncached rather than failing.
         new Thread(() -> {
+            long startMs = System.currentTimeMillis();
             String[] hashAndSize = MediaHasher.hashAndSize(context, mediaUri, headers);
+            long elapsedMs = System.currentTimeMillis() - startMs;
             mainHandler.post(() -> {
                 if (!mediaUri.equals(this.mediaUri)) return; // media changed while we hashed
                 videoHash = hashAndSize == null ? null : hashAndSize[0];
+                Log.i(TAG, "media hash " + (videoHash != null ? "ready" : "unavailable — falling back to URI-based cache key")
+                        + " after " + elapsedMs + "ms");
                 if (onHashReady != null) {
                     onHashReady.accept(hashAndSize == null ? null : hashAndSize[1]);
                 }
@@ -151,7 +155,12 @@ public class EmbeddedSubtitleController {
         if (option == null) return null;
         switch (option.source) {
             case EMBEDDED:
-                return videoHash == null ? null : CacheKeys.embedded(videoHash, option.embeddedTextIndex);
+                if (videoHash != null) return CacheKeys.embedded(videoHash, option.embeddedTextIndex);
+                // Hashing failed (e.g. the source timed out) — fall back to a URI-based key rather
+                // than caching nothing at all for this media. Weaker (doesn't survive a fresh debrid
+                // resolve for the same file), but strictly better than the alternative.
+                return mediaUri == null ? null
+                        : CacheKeys.embeddedByUri(mediaUri.toString(), option.embeddedTextIndex);
             case PROVIDER:
                 return option.providerRef == null ? null : CacheKeys.provider(option.providerRef);
             default:
@@ -174,34 +183,53 @@ public class EmbeddedSubtitleController {
         if (option.imageFormat) return false; // bitmap subtitles have no text to extract
         if (mediaUri == null) return false;
 
-        if (option.id.equals(cachedOptionId) && cachedFile != null) {
-            onReady.accept(cachedFile);
+        SubtitleFile cached = checkCache(option);
+        if (cached != null) {
+            onReady.accept(cached);
             return true;
         }
         if (isRunning()) return true; // already working on it; the running request wins
-
-        String key = keyFor(option);
-        session.setCache(cache, key);
-
-        // A finished read on disk costs nothing to reuse: no thread, no progress, no download.
-        CachedSubtitle hit = session.cached();
-        if (hit != null && hit.entryCount() > 0) {
-            Log.i(TAG, "cache hit for track " + option.embeddedTextIndex + ": "
-                    + hit.entryCount() + " cues, stored " + ageDescription(hit.getStoredAtMs()));
-            cachedOptionId = option.id;
-            cachedFile = hit.getSubtitle();
-            lastWasFromCache = true;
-            onReady.accept(cachedFile);
-            return true;
-        }
 
         lastWasFromCache = false;
         pendingOptionId = option.id;
         pendingCallback = onReady;
         Log.i(TAG, "extracting embedded track " + option.embeddedTextIndex + " ('" + option.label
-                + "') · cacheKey=" + key);
+                + "') · cacheKey=" + keyFor(option));
         session.start(mediaUri.toString(), option.embeddedTextIndex, option.language);
         return true;
+    }
+
+    /**
+     * A cache-only peek: never reads the container, never starts a background extraction. Used to
+     * opportunistically adopt an already-cached track the moment it's selected — a disk cache hit is
+     * effectively free, so the Sync screen shouldn't sit empty until the user happens to press
+     * Translate/Auto-sync, which is the only thing that otherwise calls {@link #ensureExtracted}.
+     */
+    @Nullable
+    public SubtitleFile tryCached(SubtitleOption option) {
+        if (option == null || option.source != SubtitleOption.Source.EMBEDDED) return null;
+        if (option.imageFormat) return null;
+        if (mediaUri == null) return null;
+        return checkCache(option);
+    }
+
+    @Nullable
+    private SubtitleFile checkCache(SubtitleOption option) {
+        if (option.id.equals(cachedOptionId) && cachedFile != null) {
+            return cachedFile;
+        }
+        String key = keyFor(option);
+        session.setCache(cache, key);
+
+        // A finished read on disk costs nothing to reuse: no thread, no progress, no download.
+        CachedSubtitle hit = session.cached();
+        if (hit == null || hit.entryCount() == 0) return null;
+        Log.i(TAG, "cache hit for track " + option.embeddedTextIndex + ": "
+                + hit.entryCount() + " cues, stored " + ageDescription(hit.getStoredAtMs()));
+        cachedOptionId = option.id;
+        cachedFile = hit.getSubtitle();
+        lastWasFromCache = true;
+        return cachedFile;
     }
 
     public void cancel() {
