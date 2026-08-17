@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import subtitleengine.provider.MatchStrategy;
 import subtitleengine.selection.SubtitleOptionSorter;
 
 /**
@@ -149,7 +150,8 @@ public class SubtitleSelectorView extends LinearLayout {
         if (options != null) {
             for (SubtitleOption o : options) {
                 byId.put(o.id, o);
-                refs.add(new SubtitleOptionSorter.Ref(o.id, o.language, sorterSource(o.source)));
+                refs.add(new SubtitleOptionSorter.Ref(o.id, o.language, sorterSource(o.source),
+                        o.matchStrategy == MatchStrategy.HASH));
             }
         }
         List<String> target = SubtitleSettings.getLanguageList(getContext(), SubtitleSettings.KEY_TARGET_LANGS);
@@ -496,6 +498,14 @@ public class SubtitleSelectorView extends LinearLayout {
         if (o.synced) {
             if (sb.length() > 0) sb.append("  ");
             sb.append("Synced");
+        }
+        // TITLE is the least trustworthy match and not worth calling out — see MatchStrategy.
+        if (o.matchStrategy == MatchStrategy.HASH) {
+            if (sb.length() > 0) sb.append("  ");
+            sb.append("Hash");
+        } else if (o.matchStrategy == MatchStrategy.MEDIA_ID) {
+            if (sb.length() > 0) sb.append("  ");
+            sb.append("IMDB");
         }
         if (o.rating > 0) {
             if (sb.length() > 0) sb.append("  ");

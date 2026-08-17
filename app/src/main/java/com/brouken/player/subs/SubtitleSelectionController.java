@@ -581,7 +581,8 @@ public class SubtitleSelectionController {
             String lang = r.getLanguage() != null ? r.getLanguage().toUpperCase(Locale.ROOT) : "?";
             String label = lang + " · " + r.getProviderName();
             providerOptions.add(SubtitleOption.provider(
-                    "prov" + r.getId(), label, r.getLanguage(), r.getId(), r.getRating(), r.getDownloadCount()));
+                    "prov" + r.getId(), label, r.getLanguage(), r.getId(), r.getRating(), r.getDownloadCount(),
+                    r.getMatchStrategy()));
         }
         loadingMore = false;
         refresh();

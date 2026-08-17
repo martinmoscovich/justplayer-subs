@@ -4,6 +4,8 @@ import android.net.Uri;
 
 import androidx.annotation.Nullable;
 
+import subtitleengine.provider.MatchStrategy;
+
 /**
  * One selectable subtitle in the sync panel's selector. Sources:
  * <ul>
@@ -56,11 +58,15 @@ public class SubtitleOption {
      *  list shares this one's label — e.g. the same provider offering both .srt and .vtt for the
      *  same language. Null otherwise: with nothing to disambiguate, showing it would just be noise. */
     @Nullable public final String format;
+    /** PROVIDER: how this result was found — see {@link MatchStrategy}. {@code null} elsewhere
+     *  (embedded/external aren't provider search results, so the notion doesn't apply). */
+    @Nullable public final MatchStrategy matchStrategy;
 
     private SubtitleOption(String id, String label, @Nullable String language, Source source,
                            State state, @Nullable Uri uri, int embeddedTextIndex,
                            @Nullable String providerRef, float rating, int downloadCount,
-                           boolean imageFormat, @Nullable String format) {
+                           boolean imageFormat, @Nullable String format,
+                           @Nullable MatchStrategy matchStrategy) {
         this.id = id;
         this.label = label;
         this.language = language;
@@ -73,24 +79,25 @@ public class SubtitleOption {
         this.downloadCount = downloadCount;
         this.imageFormat = imageFormat;
         this.format = format;
+        this.matchStrategy = matchStrategy;
     }
 
     public static SubtitleOption external(String id, String label, @Nullable String language, Uri uri,
                                           @Nullable String format) {
         return new SubtitleOption(id, label, language, Source.EXTERNAL, State.READY, uri, -1, null, 0f, 0, false,
-                format);
+                format, null);
     }
 
     public static SubtitleOption embedded(String id, String label, @Nullable String language, int textIndex,
                                           boolean imageFormat) {
         return new SubtitleOption(id, label, language, Source.EMBEDDED, State.READY, null, textIndex, null, 0f, 0,
-                imageFormat, null);
+                imageFormat, null, null);
     }
 
     public static SubtitleOption provider(String id, String label, @Nullable String language, String providerRef,
-                                          float rating, int downloadCount) {
+                                          float rating, int downloadCount, MatchStrategy matchStrategy) {
         return new SubtitleOption(id, label, language, Source.PROVIDER, State.READY, null, -1, providerRef,
-                rating, downloadCount, false, null);
+                rating, downloadCount, false, null, matchStrategy);
     }
 
     public boolean isReady() {
