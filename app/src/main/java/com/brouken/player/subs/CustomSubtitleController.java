@@ -329,12 +329,27 @@ public class CustomSubtitleController
         panel.setSyncSession(sync.getSession());
         translation.setSource(file, selection.mediaTitle());
         autoSync.setSource(file, mediaUri);
-        // The "Translated" chip means exactly this: a cache hit is waiting, and it's free to load —
-        // show it instead of the original, same reasoning as adopting a cached extraction on select.
-        // Applies to every source (embedded/external/provider) alike, since they all funnel through
-        // this same callback once their cues are actually available.
-        if (selectedOption != null && selectedOption.translated) {
-            translation.start(currentPositionMs());
+        // A cache hit is effectively free — load it instead of the original, same reasoning as
+        // adopting a cached extraction on select. Applies to every source (embedded/external/
+        // provider) alike, since they all funnel through this same callback once their cues are
+        // actually available.
+        //
+        // Checked live against the cache here, deliberately NOT via selectedOption.translated: this
+        // callback is invoked from three independent places (CustomSubtitleController's own
+        // adopt-from-cache block, and SubtitleSelectionController.onExternalLoaded() — used by both
+        // external and provider loading) that each call refresh() (which recomputes that flag via
+        // markCacheStatus()) at their own, uncoordinated point relative to this callback. Trusting
+        // the flag means trusting all of them to call refresh() before onSubtitleLoaded() — true for
+        // the embedded case (fixed to be, see markCacheStatus() call order in onOptionsChanged()),
+        // false for onExternalLoaded() (refresh() comes after) — confirmed live: FR showed the
+        // "Translated" chip correctly but Sync stayed on the untranslated original. A direct cache
+        // read has no such ordering dependency on a fourth thing to keep in sync.
+        if (selectedOption != null) {
+            String key = embedded.keyFor(selectedOption);
+            if (key != null && embedded.cache().getTranslation(key, translation.targetLanguage(),
+                    System.currentTimeMillis()) != null) {
+                translation.start(currentPositionMs());
+            }
         }
         renderOverlay();
     }
