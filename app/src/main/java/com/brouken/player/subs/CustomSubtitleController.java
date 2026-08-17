@@ -364,6 +364,13 @@ public class CustomSubtitleController
         boolean selectionChanged = previous != selectedOption
                 && !(previous != null && selectedOption != null && previous.id.equals(selectedOption.id));
         if (selectionChanged && embedded.isRunning()) embedded.cancel();
+        // Must run before the adopt-from-cache block below: a cache hit adopts synchronously, which
+        // calls onSubtitleLoaded() before this method returns — and onSubtitleLoaded() reads
+        // selectedOption.translated to decide whether to load the translation. Computing it after
+        // adopting left that read seeing whatever this SubtitleOption instance's flag happened to
+        // still hold from an earlier pass (false on a freshly-rebuilt list) instead of the current
+        // cache state — the "translated chip works but the load is inconsistent" bug.
+        markCacheStatus(options);
         // A disk cache hit is effectively free — adopt it the moment the track is selected, so Sync
         // has cues to work with right away instead of sitting empty until the user happens to press
         // Translate/Auto-sync (the only thing that otherwise triggers ensureExtracted()).
@@ -376,7 +383,6 @@ public class CustomSubtitleController
         }
         translation.setExtractableSource(needsExtraction());
         translation.setCache(embedded.cache(), embedded.keyFor(selectedOption));
-        markCacheStatus(options);
         panel.setOptions(options, selectedId, loadingMore);
     }
 
