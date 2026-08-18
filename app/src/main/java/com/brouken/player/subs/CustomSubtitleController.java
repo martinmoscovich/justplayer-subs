@@ -16,6 +16,7 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 
 import java.util.List;
 
+import subtitleengine.cache.CachedTranslation;
 import subtitleengine.cache.SubtitleCache;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.sync.SyncState;
@@ -48,6 +49,23 @@ public class CustomSubtitleController
     @Nullable private Uri mediaUri;
     /** The option currently selected, kept so the Translate/Sync screens know what they are acting on. */
     @Nullable private SubtitleOption selectedOption;
+
+    /** Just a name for the option/file/cache-key trio that travels together once a subtitle actually
+     *  has cues to show — see {@link #onSubtitleLoaded}. Distinct from {@link #selectedOption}: that
+     *  one exists the instant the user picks something, even for an embedded track that has no
+     *  {@link SubtitleFile} of its own yet (Media3 renders it natively until Translate/Auto-sync asks
+     *  for real cues) — conflating the two was the root of this session's recurring bug. */
+    private static final class ActiveSubtitle {
+        final SubtitleOption option;
+        final SubtitleFile file;
+        @Nullable final String cacheKey;
+
+        ActiveSubtitle(SubtitleOption option, SubtitleFile file, @Nullable String cacheKey) {
+            this.option = option;
+            this.file = file;
+            this.cacheKey = cacheKey;
+        }
+    }
 
     public CustomSubtitleController(Context context, ViewGroup root, ExoPlayer player,
                                     DefaultTrackSelector trackSelector) {
@@ -214,8 +232,7 @@ public class CustomSubtitleController
                 // extraction landing here must not clobber whatever is selected now, or adopt the
                 // wrong subtitle and start translating content nobody asked for anymore.
                 if (selectedOption != requested) return;
-                adoptExtractedSubtitle(file);
-                announceCacheUse();
+                adoptExtractedAndAnnounce(file);
                 translation.start(currentPositionMs());
             });
             return;
@@ -244,8 +261,7 @@ public class CustomSubtitleController
             embedded.ensureExtracted(requested, file -> {
                 // Same staleness guard as onStartTranslate() — see the comment there.
                 if (selectedOption != requested) return;
-                adoptExtractedSubtitle(file);
-                announceCacheUse();
+                adoptExtractedAndAnnounce(file);
                 startAutoSync(fromHere);
             });
             return;
@@ -263,16 +279,19 @@ public class CustomSubtitleController
         return selectedOption != null
                 && selectedOption.source == SubtitleOption.Source.EMBEDDED
                 && !selectedOption.imageFormat
-                && !sync.isActive(); // active == the overlay already owns a parsed subtitle
+                && selectedOption.trackState == SubtitleOption.TrackState.NATIVE;
     }
 
     /**
      * Promotes a freshly-read embedded track to a first-class subtitle: from here on our overlay
      * draws it and Media3's text track goes off, which is what makes sync and translation apply to
-     * it at all (and keeps a single subtitle on screen).
+     * it at all (and keeps a single subtitle on screen). Paired with {@link #announceCacheUse()} at
+     * every one of its 3 call sites (the opportunistic on-select adopt, and the extract-then-translate/
+     * extract-then-sync callbacks) — collapsed here so that pairing can't drift between them.
      */
-    private void adoptExtractedSubtitle(SubtitleFile file) {
+    private void adoptExtractedAndAnnounce(SubtitleFile file) {
         selection.replaceActiveWithExtracted(file);
+        announceCacheUse();
     }
 
     private void onExtractionStatus(@Nullable String status) {
@@ -319,38 +338,45 @@ public class CustomSubtitleController
 
     // --- SubtitleSelectionController.Listener ---
 
-    @Override public void onSubtitleLoaded(SubtitleFile file) {
-        sync.setSubtitle(file);
-        if (selectedOption != null) {
-            String key = embedded.keyFor(selectedOption);
-            SyncState saved = key != null ? embedded.cache().getSyncState(key) : null;
-            if (saved != null) sync.getSession().restoreState(saved);
-        }
-        panel.setSyncSession(sync.getSession());
-        translation.setSource(file, selection.mediaTitle());
-        autoSync.setSource(file, mediaUri);
+    @Override public void onSubtitleLoaded(SubtitleFile file, SubtitleOption option) {
+        ActiveSubtitle active = new ActiveSubtitle(option, file, embedded.keyFor(option));
+        SyncState saved = active.cacheKey != null ? embedded.cache().getSyncState(active.cacheKey) : null;
+
+        translation.setSource(active.file, selection.mediaTitle());
+        // Set explicitly here, off `active.cacheKey` — deliberately NOT left for onOptionsChanged()'s
+        // own translation.setCache(embedded.cache(), embedded.keyFor(selectedOption)) call to handle:
+        // for external/provider, onExternalLoaded() fires this callback BEFORE calling refresh() (which
+        // is what triggers onOptionsChanged()), so at the point below where a cached translation would
+        // be loaded, the session's cache key was still whatever the previously selected option had — a
+        // real translation stayed unfound in its own (correct) cache entry because the session was
+        // still looking under yesterday's key. Same ordering hazard as the SubtitleFile itself (see the
+        // Listener javadoc); same fix, set it from what was just handed in.
+        translation.setCache(embedded.cache(), active.cacheKey);
+
         // A cache hit is effectively free — load it instead of the original, same reasoning as
         // adopting a cached extraction on select. Applies to every source (embedded/external/
         // provider) alike, since they all funnel through this same callback once their cues are
         // actually available.
-        //
-        // Checked live against the cache here, deliberately NOT via selectedOption.translated: this
-        // callback is invoked from three independent places (CustomSubtitleController's own
-        // adopt-from-cache block, and SubtitleSelectionController.onExternalLoaded() — used by both
-        // external and provider loading) that each call refresh() (which recomputes that flag via
-        // markCacheStatus()) at their own, uncoordinated point relative to this callback. Trusting
-        // the flag means trusting all of them to call refresh() before onSubtitleLoaded() — true for
-        // the embedded case (fixed to be, see markCacheStatus() call order in onOptionsChanged()),
-        // false for onExternalLoaded() (refresh() comes after) — confirmed live: FR showed the
-        // "Translated" chip correctly but Sync stayed on the untranslated original. A direct cache
-        // read has no such ordering dependency on a fourth thing to keep in sync.
-        if (selectedOption != null) {
-            String key = embedded.keyFor(selectedOption);
-            if (key != null && embedded.cache().getTranslation(key, translation.targetLanguage(),
-                    System.currentTimeMillis()) != null) {
+        SubtitleFile toShow = active.file;
+        boolean hasCachedTranslation = active.cacheKey != null && embedded.cache().getTranslation(
+                active.cacheKey, translation.targetLanguage(), System.currentTimeMillis()) != null;
+        if (hasCachedTranslation) {
+            // Complete → apply synchronously so the very first frame shown is already the translation
+            // (start() would still spin a worker thread just to do this same merge, visible as a flash
+            // of the original first — confirmed live). Partial → nothing to show yet beyond the
+            // original, so fall back to start(), which resumes translating exactly what's missing.
+            SubtitleFile cachedTranslation = translation.loadCompleteFromCache();
+            if (cachedTranslation != null) {
+                toShow = cachedTranslation;
+            } else {
                 translation.start(currentPositionMs());
             }
         }
+
+        sync.setSubtitle(toShow);
+        if (saved != null) sync.getSession().restoreState(saved);
+        panel.setSyncSession(sync.getSession());
+        autoSync.setSource(active.file, mediaUri);
         renderOverlay();
     }
 
@@ -392,8 +418,7 @@ public class CustomSubtitleController
         if (selectionChanged) {
             SubtitleFile cached = embedded.tryCached(selectedOption);
             if (cached != null) {
-                adoptExtractedSubtitle(cached);
-                announceCacheUse();
+                adoptExtractedAndAnnounce(cached);
             }
         }
         translation.setExtractableSource(needsExtraction());
@@ -413,7 +438,13 @@ public class CustomSubtitleController
         for (SubtitleOption o : options) {
             o.extracted = o.source == SubtitleOption.Source.EMBEDDED && embedded.isCached(o);
             String key = embedded.keyFor(o);
-            o.translated = key != null && cache.getTranslation(key, targetLanguage, now) != null;
+            // isComplete(), not just present: a translation interrupted mid-run (app closed, source
+            // changed) is also stored so the next run resumes cheaply, but showing "Translated" for
+            // that would tell the user something finished that didn't — and selecting it silently
+            // hits the API again for whatever chunk is still missing, which is surprising if the chip
+            // just said it was already done.
+            CachedTranslation translation = key != null ? cache.getTranslation(key, targetLanguage, now) : null;
+            o.translated = translation != null && translation.isComplete();
             o.synced = key != null && cache.getSyncState(key) != null;
         }
     }

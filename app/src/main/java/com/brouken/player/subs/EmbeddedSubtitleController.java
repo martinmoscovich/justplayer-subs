@@ -12,7 +12,6 @@ import java.util.Locale;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.Consumer;
 
-import subtitleengine.cache.CacheKeys;
 import subtitleengine.cache.CachePolicy;
 import subtitleengine.cache.CachedSubtitle;
 import subtitleengine.cache.SubtitleCache;
@@ -32,7 +31,7 @@ import subtitleengine.embedded.ExtractionProgress;
  * renders it, as always), and only asking to translate or sync it pays for reading the container.
  * The result is cached per track, so a second request after a completed extraction is free.
  */
-public class EmbeddedSubtitleController {
+public class EmbeddedSubtitleController implements SubtitleRetriever {
 
     private static final String TAG = "EmbeddedSubtitles";
 
@@ -53,9 +52,8 @@ public class EmbeddedSubtitleController {
     @Nullable private String videoHash;
 
     @Nullable private Uri mediaUri;
-    /** Id of the option being extracted, and the callback waiting for it. */
-    @Nullable private String pendingOptionId;
-    @Nullable private Consumer<SubtitleFile> pendingCallback;
+    /** The callback waiting for the extraction in flight, if any. */
+    @Nullable private Callback pendingCallback;
     /** Last successful extraction, keyed by option id — re-opening Translate must not re-download. */
     @Nullable private String cachedOptionId;
     @Nullable private SubtitleFile cachedFile;
@@ -152,20 +150,7 @@ public class EmbeddedSubtitleController {
      */
     @Nullable
     public String keyFor(SubtitleOption option) {
-        if (option == null) return null;
-        switch (option.source) {
-            case EMBEDDED:
-                if (videoHash != null) return CacheKeys.embedded(videoHash, option.embeddedTextIndex);
-                // Hashing failed (e.g. the source timed out) — fall back to a URI-based key rather
-                // than caching nothing at all for this media. Weaker (doesn't survive a fresh debrid
-                // resolve for the same file), but strictly better than the alternative.
-                return mediaUri == null ? null
-                        : CacheKeys.embeddedByUri(mediaUri.toString(), option.embeddedTextIndex);
-            case PROVIDER:
-                return option.providerRef == null ? null : CacheKeys.provider(option.providerRef);
-            default:
-                return option.uri == null ? null : CacheKeys.external(option.uri.toString());
-        }
+        return option == null ? null : SubtitleCacheKey.of(option, videoHash, mediaUri);
     }
 
     public boolean isRunning() {
@@ -175,6 +160,11 @@ public class EmbeddedSubtitleController {
     /**
      * Makes {@code option}'s cues available, reading the container if this is the first request.
      * {@code onReady} runs on the main thread; it is not called if the read fails or is cancelled.
+     * Thin wrapper over {@link SubtitleRetriever#retrieve}: this class implements {@link SubtitleRetriever}
+     * itself (see {@link #peekCache}/{@link #fetchAndStore}), same shape external/provider use in
+     * {@code SubtitleSelectionController} — the only thing specific to embedded here is the dedup
+     * against an extraction already in flight ({@link #isRunning()}), since a second request for it
+     * has nowhere useful to go until the first finishes.
      *
      * @return false if the request could not even be started (no media, wrong kind of track)
      */
@@ -182,20 +172,23 @@ public class EmbeddedSubtitleController {
         if (option.source != SubtitleOption.Source.EMBEDDED) return false;
         if (option.imageFormat) return false; // bitmap subtitles have no text to extract
         if (mediaUri == null) return false;
-
-        SubtitleFile cached = checkCache(option);
-        if (cached != null) {
-            onReady.accept(cached);
-            return true;
-        }
         if (isRunning()) return true; // already working on it; the running request wins
 
-        lastWasFromCache = false;
-        pendingOptionId = option.id;
-        pendingCallback = onReady;
-        Log.i(TAG, "extracting embedded track " + option.embeddedTextIndex + " ('" + option.label
-                + "') · cacheKey=" + keyFor(option));
-        session.start(mediaUri.toString(), option.embeddedTextIndex, option.language);
+        retrieve(option, () -> {
+            lastWasFromCache = false;
+            Log.i(TAG, "extracting embedded track " + option.embeddedTextIndex + " ('" + option.label
+                    + "') · cacheKey=" + keyFor(option));
+        }, new Callback() {
+            @Override public void onLoaded(SubtitleFile file, boolean fromCache) {
+                lastWasFromCache = fromCache;
+                cachedOptionId = option.id;
+                cachedFile = file;
+                onReady.accept(file);
+            }
+            @Override public void onError(Exception e) {
+                // Already logged and toasted inside onProgress()'s DONE(no-cues)/ERROR branches.
+            }
+        });
         return true;
     }
 
@@ -210,11 +203,12 @@ public class EmbeddedSubtitleController {
         if (option == null || option.source != SubtitleOption.Source.EMBEDDED) return null;
         if (option.imageFormat) return null;
         if (mediaUri == null) return null;
-        return checkCache(option);
+        return peekCache(option);
     }
 
     @Nullable
-    private SubtitleFile checkCache(SubtitleOption option) {
+    @Override
+    public SubtitleFile peekCache(SubtitleOption option) {
         if (option.id.equals(cachedOptionId) && cachedFile != null) {
             return cachedFile;
         }
@@ -232,9 +226,14 @@ public class EmbeddedSubtitleController {
         return cachedFile;
     }
 
+    @Override
+    public void fetchAndStore(SubtitleOption option, Callback callback) {
+        pendingCallback = callback;
+        session.start(mediaUri.toString(), option.embeddedTextIndex, option.language);
+    }
+
     public void cancel() {
         if (isRunning()) session.cancel();
-        pendingOptionId = null;
         pendingCallback = null;
     }
 
@@ -257,15 +256,13 @@ public class EmbeddedSubtitleController {
                     // Not an exception, but not usable either — and silence here would look like a hang.
                     Log.w(TAG, "extraction finished with no cues");
                     toast("That embedded track has no readable subtitles");
-                    clearPending();
+                    failPending("no readable subtitles");
                     return;
                 }
                 Log.i(TAG, "extraction done: " + file.getEntries().size() + " cues");
-                cachedOptionId = pendingOptionId;
-                cachedFile = file;
-                Consumer<SubtitleFile> callback = pendingCallback;
+                Callback loadedCallback = pendingCallback;
                 clearPending();
-                if (callback != null) callback.accept(file);
+                if (loadedCallback != null) loadedCallback.onLoaded(file, false);
                 break;
             case CANCELLED:
                 notifyStatus(null);
@@ -276,7 +273,7 @@ public class EmbeddedSubtitleController {
                 // The throwable, not just its message: this is the only place the cause survives.
                 Log.w(TAG, "extraction failed", progress.getError());
                 toast("Could not read the embedded subtitle: " + progress.getErrorMessage());
-                clearPending();
+                failPending(progress.getErrorMessage());
                 break;
             default:
                 break;
@@ -284,8 +281,13 @@ public class EmbeddedSubtitleController {
     }
 
     private void clearPending() {
-        pendingOptionId = null;
         pendingCallback = null;
+    }
+
+    private void failPending(String message) {
+        Callback callback = pendingCallback;
+        clearPending();
+        if (callback != null) callback.onError(new RuntimeException(message));
     }
 
     private void notifyStatus(@Nullable String status) {

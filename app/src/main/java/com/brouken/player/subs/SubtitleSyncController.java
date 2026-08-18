@@ -77,10 +77,6 @@ public class SubtitleSyncController {
         return session;
     }
 
-    public boolean isActive() {
-        return active;
-    }
-
     /** Starts syncing/rendering a subtitle (fresh sync state). */
     public void setSubtitle(@Nullable SubtitleFile f) {
         session.setSubtitle(f);

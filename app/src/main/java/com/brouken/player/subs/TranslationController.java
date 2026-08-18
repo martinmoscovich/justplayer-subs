@@ -173,6 +173,19 @@ public class TranslationController implements TranslationSession.Listener {
         pushState();
     }
 
+    /**
+     * If a complete translation is already cached for the current source and target language, applies
+     * it synchronously (no worker thread, no network) and returns it — {@code null} if none, in which
+     * case the caller should fall back to {@link #start}. See {@link TranslationSession#loadCompleteFromCache}
+     * for why this exists as a separate call instead of just always using {@link #start}.
+     */
+    @Nullable
+    public SubtitleFile loadCompleteFromCache() {
+        SubtitleFile result = session.loadCompleteFromCache(targetLanguage());
+        if (result != null) pushState();
+        return result;
+    }
+
     public void cancel() {
         session.cancel();
     }

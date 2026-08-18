@@ -22,6 +22,12 @@ public class SubtitleOption {
 
     public enum State { READY, LOADING, ERROR }
 
+    /** EMBEDDED only: whether Media3 still renders this track's cues natively, or our own overlay
+     *  owns a parsed copy after {@code SubtitleSelectionController.replaceActiveWithExtracted()}
+     *  promoted it. Meaningless for EXTERNAL/PROVIDER — those never have a native renderer to fall
+     *  back to, so they only ever exist once loaded into our own overlay. */
+    public enum TrackState { NATIVE, EXTRACTED }
+
     public final String id;
     public final String label;
     @Nullable public final String language;
@@ -39,6 +45,9 @@ public class SubtitleOption {
     /** Whether a manual-sync adjustment (anchors/nudge) is saved for this option — independent of
      *  {@link #translated}: syncing and translating are unrelated actions on the same subtitle. */
     public boolean synced;
+    /** EMBEDDED only — see {@link TrackState}. Starts NATIVE; every option is a fresh instance built
+     *  per-selection-cycle by {@code rebuildEmbeddedOptions()}, so this never needs resetting by hand. */
+    public TrackState trackState = TrackState.NATIVE;
 
     /** EXTERNAL: the subtitle URI. */
     @Nullable public final Uri uri;

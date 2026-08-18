@@ -35,8 +35,6 @@ import java.util.Map;
 import java.util.Set;
 
 import okhttp3.OkHttpClient;
-import subtitleengine.cache.CacheKeys;
-import subtitleengine.cache.CachedSubtitle;
 import subtitleengine.cache.SubtitleCache;
 import subtitleengine.core.SubtitlePriorityResolver;
 import subtitleengine.core.model.ContentMetadata;
@@ -46,8 +44,6 @@ import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.core.model.SubtitleFormat;
 import subtitleengine.core.model.SubtitleSource;
 import subtitleengine.core.model.SubtitleTrack;
-import subtitleengine.parser.SubtitleConverter;
-import subtitleengine.provider.DownloadedSubtitle;
 import subtitleengine.provider.OpenSubtitlesProvider;
 import subtitleengine.provider.SubtitleProvider;
 import subtitleengine.provider.SubtitleSearchResult;
@@ -92,7 +88,13 @@ public class SubtitleSelectionController {
     public static final String EXTERNAL_TRACK_ID_PREFIX = "ext:";
 
     public interface Listener {
-        void onSubtitleLoaded(SubtitleFile file);
+        /**
+         * @param option which option {@code file} belongs to — passed explicitly rather than left for
+         *               the caller to infer from its own "currently selected" state, which this fires
+         *               ahead of updating (see the three call sites: this interface has no ordering
+         *               guarantee relative to {@link #onOptionsChanged}).
+         */
+        void onSubtitleLoaded(SubtitleFile file, SubtitleOption option);
         void onSubtitleCleared();
         void onOptionsChanged(List<SubtitleOption> options, @Nullable String selectedId, boolean loadingMore);
         /**
@@ -136,7 +138,8 @@ public class SubtitleSelectionController {
     private boolean notifiedPreferredFound = false;
     @Nullable private String mediaHash;
     @Nullable private String mediaBytes;
-    @Nullable private SubtitleCache cache;
+    @Nullable private SubtitleRetriever externalRetriever;
+    @Nullable private SubtitleRetriever providerRetriever;
 
     public SubtitleSelectionController(Context context, ExoPlayer player,
                                        DefaultTrackSelector trackSelector, Listener listener,
@@ -192,42 +195,21 @@ public class SubtitleSelectionController {
         maybeSearchProvider();
     }
 
-    /** Shares the host's cache so a subtitle downloaded once is not downloaded again. */
-    public void setCache(@Nullable SubtitleCache cache) {
-        this.cache = cache;
-    }
-
     /**
-     * Cache identity of a downloadable option. Unlike an embedded track, these identify themselves
-     * without the media: a provider result by its id, an external one by its URI — both known before
-     * the download, which is what a cache key has to be.
+     * Shares the host's cache so a subtitle downloaded once is not downloaded again, and builds the
+     * two {@link SubtitleRetriever}s (external/provider) around it — see {@link DownloadSubtitleRetriever}
+     * for why one class covers both; the only thing that differs is how each gets its raw text.
      */
-    @Nullable
-    private String cacheKeyFor(SubtitleOption opt) {
-        if (cache == null) return null;
-        if (opt.source == SubtitleOption.Source.PROVIDER) {
-            return opt.providerRef == null ? null : CacheKeys.provider(opt.providerRef);
-        }
-        if (opt.source == SubtitleOption.Source.EXTERNAL) {
-            return opt.uri == null ? null : CacheKeys.external(opt.uri.toString());
-        }
-        return null; // embedded is the extraction cache's business, keyed on the media hash
+    public void setCache(@Nullable SubtitleCache cache) {
+        externalRetriever = new DownloadSubtitleRetriever(cache, mainHandler,
+                opt -> readText(context, opt.uri));
+        providerRetriever = new DownloadSubtitleRetriever(cache, mainHandler, this::downloadProviderContent);
     }
 
-    /** @return the cached cues for this option, or {@code null}. Never throws — a miss is normal. */
-    @Nullable
-    private SubtitleFile cachedFor(SubtitleOption opt) {
-        String key = cacheKeyFor(opt);
-        if (key == null) return null;
-        CachedSubtitle hit = cache.getSubtitle(key, System.currentTimeMillis());
-        if (hit == null || !hit.isComplete() || hit.entryCount() == 0) return null;
-        return hit.getSubtitle();
-    }
-
-    private void storeInCache(SubtitleOption opt, SubtitleFile file) {
-        String key = cacheKeyFor(opt);
-        if (key == null || file.getEntries().isEmpty()) return;
-        cache.putSubtitle(key, new CachedSubtitle(file, true, 0L, System.currentTimeMillis()));
+    private String downloadProviderContent(SubtitleOption opt) throws SubtitleError.ProviderError {
+        String apiKey = SubtitleSettings.getString(context, SubtitleSettings.KEY_OPENSUBTITLES, "");
+        SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
+        return provider.download(opt.providerRef).getContent();
     }
 
     public boolean hasOptions() {
@@ -279,8 +261,11 @@ public class SubtitleSelectionController {
      */
     public void replaceActiveWithExtracted(SubtitleFile file) {
         if (selectedId == null) return;
+        SubtitleOption opt = findOption(selectedId);
+        if (opt == null) return;
+        opt.trackState = SubtitleOption.TrackState.EXTRACTED;
         disableMedia3TextTrack();
-        listener.onSubtitleLoaded(file);
+        listener.onSubtitleLoaded(file, opt);
         refresh();
         android.util.Log.i(TAG, "embedded track promoted to overlay: " + file.getEntries().size() + " cues");
     }
@@ -477,35 +462,31 @@ public class SubtitleSelectionController {
     // --- external ---
 
     private void loadExternal(SubtitleOption opt) {
-        if (opt.uri == null) return;
-        if (deliverFromCache(opt)) return;
-        opt.state = SubtitleOption.State.LOADING; // URLs can be slow — chip shows a spinner
-        refresh();
-
-        new Thread(() -> {
-            try {
-                String content = readText(context, opt.uri);
-                SubtitleFile file = SubtitleConverter.convert(content, "srt", opt.language);
-                mainHandler.post(() -> onExternalLoaded(opt, file));
-            } catch (Exception e) {
-                mainHandler.post(() -> onExternalError(opt, e));
-            }
-        }, "custom-sub-parse").start();
+        if (opt.uri == null || externalRetriever == null) return;
+        acquire(opt, externalRetriever);
     }
 
     /**
-     * Serves an option straight from the cache when it is there. Synchronous on purpose: there is no
-     * network involved, so a spinner would flash for nothing.
-     *
-     * @return true when the option was delivered and no download is needed
+     * Cache-first acquisition shared by external and provider (see {@link SubtitleRetriever}): a
+     * cache hit delivers synchronously — there is no network involved, so a spinner would flash for
+     * nothing — a miss marks the option LOADING and does the real fetch.
      */
-    private boolean deliverFromCache(SubtitleOption opt) {
-        SubtitleFile hit = cachedFor(opt);
-        if (hit == null) return false;
-        android.util.Log.i(TAG, "cache hit for '" + opt.label + "': " + hit.getEntries().size() + " cues");
-        opt.fromCache = true;
-        onExternalLoaded(opt, hit);
-        return true;
+    private void acquire(SubtitleOption opt, SubtitleRetriever retriever) {
+        retriever.retrieve(opt,
+                () -> { opt.state = SubtitleOption.State.LOADING; refresh(); },
+                new SubtitleRetriever.Callback() {
+                    @Override public void onLoaded(SubtitleFile file, boolean fromCache) {
+                        opt.fromCache = fromCache;
+                        if (fromCache) {
+                            android.util.Log.i(TAG, "cache hit for '" + opt.label + "': "
+                                    + file.getEntries().size() + " cues");
+                        }
+                        onExternalLoaded(opt, file);
+                    }
+                    @Override public void onError(Exception e) {
+                        onExternalError(opt, e);
+                    }
+                });
     }
 
     private void onExternalLoaded(SubtitleOption opt, SubtitleFile file) {
@@ -515,10 +496,7 @@ public class SubtitleSelectionController {
             return;
         }
         disableMedia3TextTrack();
-        listener.onSubtitleLoaded(file);
-        // Stored after it parsed cleanly: caching bytes that turn out to be unparseable would just
-        // make the failure permanent.
-        if (!opt.fromCache) storeInCache(opt, file);
+        listener.onSubtitleLoaded(file, opt);
         refresh();
         // opt.uri is null for provider results — log the label instead of a bare "null".
         android.util.Log.i(TAG, "subtitle active: " + file.getEntries().size() + " cues from "
@@ -604,21 +582,8 @@ public class SubtitleSelectionController {
     }
 
     private void loadProvider(SubtitleOption opt) {
-        if (opt.providerRef == null) return;
-        if (deliverFromCache(opt)) return;
-        opt.state = SubtitleOption.State.LOADING;
-        refresh();
-        String apiKey = SubtitleSettings.getString(context, SubtitleSettings.KEY_OPENSUBTITLES, "");
-        new Thread(() -> {
-            SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
-            try {
-                DownloadedSubtitle dl = provider.download(opt.providerRef);
-                SubtitleFile file = SubtitleConverter.convert(dl.getContent(), "srt", opt.language);
-                mainHandler.post(() -> onExternalLoaded(opt, file));
-            } catch (Exception e) {
-                mainHandler.post(() -> onExternalError(opt, e));
-            }
-        }, "opensubtitles-download").start();
+        if (opt.providerRef == null || providerRetriever == null) return;
+        acquire(opt, providerRetriever);
     }
 
     @Nullable
@@ -644,6 +609,10 @@ public class SubtitleSelectionController {
     // --- embedded (hand back to Media3) ---
 
     private void selectEmbedded(SubtitleOption opt) {
+        // Re-selecting an already-promoted track hands it back to Media3's native renderer (see
+        // onSubtitleCleared() below) — reset here so needsExtraction() sees it as NATIVE again, not
+        // stuck EXTRACTED from a previous selection of the same option.
+        opt.trackState = SubtitleOption.TrackState.NATIVE;
         listener.onSubtitleCleared();
         Tracks tracks = player.getCurrentTracks();
         int ti = 0;
