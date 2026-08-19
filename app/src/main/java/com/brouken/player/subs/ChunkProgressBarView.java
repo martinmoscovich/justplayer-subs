@@ -78,6 +78,17 @@ public class ChunkProgressBarView extends View {
 
     private static final long PULSE_PERIOD_MS = 1400L;
 
+    // TV-oriented sizing: viewed from a couch, not held in a hand — thick bar, big type.
+    private static final float COMPACT_WIDTH_DP = 130f;
+    private static final float BAR_THICK_COMPACT_DP = 12f;
+    private static final float TICK_AREA_DP = 32f;
+    private static final float BAR_THICK_DETAILED_DP = 32f;
+    private static final float GAP_DP = 6f;
+    private static final float WATCH_AREA_DP = 32f;
+    /** Below this pixel width, a segment sharing its neighbor's state visually merges into it
+     *  (no divider, no label) instead of reading as its own sliver — see the design plan. */
+    private static final float MERGE_THRESHOLD_DP = 10f;
+
     private boolean detailed = false;
     private Model model = Model.EMPTY;
 
@@ -119,15 +130,15 @@ public class ChunkProgressBarView extends View {
         hatchPaint.setColor(0x33FFFFFF);
         hatchPaint.setStrokeWidth(dp(1));
         tickTextPaint.setColor(0xFFB0BEC5);
-        tickTextPaint.setTextSize(spToPx(10));
+        tickTextPaint.setTextSize(spToPx(15));
         tickLinePaint.setColor(0xFF223040);
         tickLinePaint.setStrokeWidth(dp(1));
         watchPaint.setColor(COLOR_ACCENT);
         watchPaint.setStrokeWidth(dp(3));
         watchTextPaint.setColor(COLOR_ACCENT);
-        watchTextPaint.setTextSize(spToPx(10));
+        watchTextPaint.setTextSize(spToPx(15));
         labelPaint.setColor(0xFF10151A);
-        labelPaint.setTextSize(spToPx(9));
+        labelPaint.setTextSize(spToPx(13));
         labelPaint.setTextAlign(Paint.Align.CENTER);
     }
 
@@ -145,8 +156,12 @@ public class ChunkProgressBarView extends View {
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        int width = MeasureSpec.getSize(widthMeasureSpec);
-        int height = detailed ? dp(56) : dp(9);
+        int width = detailed
+                ? MeasureSpec.getSize(widthMeasureSpec)
+                : Math.min(MeasureSpec.getSize(widthMeasureSpec), dp(COMPACT_WIDTH_DP));
+        int height = detailed
+                ? dp(TICK_AREA_DP) + dp(BAR_THICK_DETAILED_DP) + dp(GAP_DP) + dp(WATCH_AREA_DP)
+                : dp(BAR_THICK_COMPACT_DP);
         setMeasuredDimension(width, height);
     }
 
@@ -158,14 +173,17 @@ public class ChunkProgressBarView extends View {
         int w = getWidth();
         if (segments.isEmpty() || total <= 0 || w <= 0) return;
 
-        float barTop = detailed ? dp(18) : 0f;
-        float barBottom = detailed ? dp(18) + dp(9) : getHeight();
+        float barTop = detailed ? dp(TICK_AREA_DP) : 0f;
+        float barThick = detailed ? dp(BAR_THICK_DETAILED_DP) : dp(BAR_THICK_COMPACT_DP);
+        float barBottom = barTop + barThick;
 
         long phase = SystemClock.uptimeMillis() % PULSE_PERIOD_MS;
         float pulse = pulseFactor(phase); // 0..1..0 triangular wave
         boolean anyPulsing = false;
+        float mergeThresholdPx = dp(MERGE_THRESHOLD_DP);
 
-        for (Segment seg : segments) {
+        for (int i = 0; i < segments.size(); i++) {
+            Segment seg = segments.get(i);
             float left = xFor(seg.startMs, total, w);
             float right = xFor(seg.endMs, total, w);
             if (right <= left) continue;
@@ -195,13 +213,22 @@ public class ChunkProgressBarView extends View {
                 drawHatch(canvas, left, barTop, right, barBottom);
             }
 
-            if (right - left > dp(1)) {
+            // A short segment sharing its neighbor's state reads as one continuous block instead of
+            // a sliver with its own divider — EXTRACTING is excluded, its fill amount differs
+            // segment to segment even when the base state matches, so the divider still matters there.
+            Segment next = (i + 1 < segments.size()) ? segments.get(i + 1) : null;
+            boolean mergesWithNext = next != null && next.state == seg.state && seg.state != SegmentState.EXTRACTING
+                    && (xFor(next.endMs, total, w) - right) < mergeThresholdPx;
+            if (!mergesWithNext && right - left > dp(1)) {
                 canvas.drawLine(right, barTop, right, barBottom,
                         seg.endEstimated ? dashedBorder() : borderPaint);
             }
 
-            if (detailed && seg.label != null && (right - left) > dp(28)) {
-                canvas.drawText(seg.label, (left + right) / 2f, barBottom - dp(3), labelPaint);
+            if (detailed && seg.label != null) {
+                float textWidth = labelPaint.measureText(seg.label);
+                if (right - left > textWidth + dp(8)) {
+                    canvas.drawText(seg.label, (left + right) / 2f, barBottom - dp(9), labelPaint);
+                }
             }
         }
 
@@ -219,10 +246,16 @@ public class ChunkProgressBarView extends View {
     }
 
     private void drawTicks(Canvas canvas, List<Segment> segments, long total, int w, float barTop) {
-        canvas.drawText(formatDuration(0), 2, barTop - dp(4), tickTextPaint);
+        float textBaseline = barTop - dp(8);
+        float lastLabelRight = Float.NEGATIVE_INFINITY;
+
+        String startLabel = formatDuration(0);
+        canvas.drawText(startLabel, 2, textBaseline, tickTextPaint);
+        lastLabelRight = 2 + tickTextPaint.measureText(startLabel);
+
         String endLabel = formatDuration(total);
         float endWidth = tickTextPaint.measureText(endLabel);
-        canvas.drawText(endLabel, w - endWidth - 2, barTop - dp(4), tickTextPaint);
+        float endLabelLeft = w - endWidth - 2;
 
         for (int i = 0; i < segments.size() - 1; i++) {
             // A boundary between two consecutive segments; skip if they don't actually touch (gap
@@ -231,24 +264,35 @@ public class ChunkProgressBarView extends View {
             Segment b = segments.get(i + 1);
             if (a.endMs != b.startMs) continue;
             float x = xFor(a.endMs, total, w);
-            canvas.drawLine(x, barTop, x, barTop + dp(9), tickLinePaint);
+            canvas.drawLine(x, barTop, x, barTop + dp(10), tickLinePaint);
+
             String label = (a.endEstimated ? "~" : "") + formatDuration(a.endMs);
             float tw = tickTextPaint.measureText(label);
             float tx = Math.max(2, Math.min(w - tw - 2, x - tw / 2f));
-            canvas.drawText(label, tx, barTop - dp(4), tickTextPaint);
+            // Crowded boundaries (many short chunks): the tick mark always draws, the number only
+            // draws if it clears the previous label and won't run into the fixed end-of-bar label —
+            // an omitted number beats an unreadable pile of overlapping ones.
+            boolean clearsPrevious = tx > lastLabelRight + dp(6);
+            boolean clearsEnd = tx + tw < endLabelLeft - dp(6);
+            if (clearsPrevious && clearsEnd) {
+                canvas.drawText(label, tx, textBaseline, tickTextPaint);
+                lastLabelRight = tx + tw;
+            }
         }
+
+        canvas.drawText(endLabel, endLabelLeft, textBaseline, tickTextPaint);
     }
 
     private void drawWatchBand(Canvas canvas, long total, int w, float barBottom) {
         float x1 = xFor(model.watchFromMs, total, w);
         float x2 = xFor(model.watchUntilMs, total, w);
-        float y = barBottom + dp(10);
+        float y = barBottom + dp(GAP_DP) + dp(10);
         canvas.drawLine(x1, y, x2, y, watchPaint);
-        canvas.drawCircle(x1, y, dp(2.5f), watchPaint);
-        canvas.drawCircle(x2, y, dp(2.5f), watchPaint);
-        String label = "mirable hasta " + formatDuration(model.watchUntilMs);
-        canvas.drawText(label, Math.min(x2 + dp(6), w - watchTextPaint.measureText(label) - 2),
-                y + dp(4), watchTextPaint);
+        canvas.drawCircle(x1, y, dp(3.5f), watchPaint);
+        canvas.drawCircle(x2, y, dp(3.5f), watchPaint);
+        String label = "watchable until " + formatDuration(model.watchUntilMs);
+        canvas.drawText(label, Math.min(x2 + dp(8), w - watchTextPaint.measureText(label) - 2),
+                y + dp(6), watchTextPaint);
     }
 
     private void drawHatch(Canvas canvas, float left, float top, float right, float bottom) {

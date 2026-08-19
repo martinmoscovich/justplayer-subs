@@ -6,7 +6,10 @@ import android.os.Handler;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -60,6 +63,8 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     private final TextView indicator;
     private final ChunkTimelineTracker timeline;
     private final ChunkProgressBarView compactBar;
+    private final TextView compactLabel;
+    private final View compactRow;
     private final ChunkProgressBarView detailedBar;
 
     /**
@@ -114,20 +119,40 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
         compactBar = new ChunkProgressBarView(context);
         compactBar.setDetailed(false);
-        compactBar.setVisibility(View.GONE);
+
+        compactLabel = new TextView(context);
+        compactLabel.setTextColor(Color.WHITE);
+        compactLabel.setShadowLayer(4f, 0f, 0f, Color.BLACK);
+        compactLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+        int labelMargin = Math.round(8 * context.getResources().getDisplayMetrics().density);
+
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackgroundColor(0x99000000);
+        row.setPadding(pad, Math.round(pad * 0.6f), pad, Math.round(pad * 0.6f));
+        row.addView(compactBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        labelLp.leftMargin = labelMargin;
+        row.addView(compactLabel, labelLp);
+        row.setVisibility(View.GONE);
+        compactRow = row;
 
         detailedBar = new ChunkProgressBarView(context);
         detailedBar.setDetailed(true);
     }
 
     /**
-     * The top-right indicator: the segmented chunk bar (see {@link #USE_CHUNK_BAR_INDICATOR}) or the
-     * text it replaces — "Translating N/M" while a run is active, then a 3s result flash (✓ finished /
-     * ⚠ partial / ✗ failed) when it ends. Hidden while the panel is open — full detail (elapsed time,
-     * cost, which lines failed, time markers) lives in the Translate screen instead.
+     * The top-right indicator: the segmented chunk bar + a "42% · ETA 1:23" label (see
+     * {@link #USE_CHUNK_BAR_INDICATOR}) or the text it replaces — "Translating N/M" while a run is
+     * active, then a 3s result flash (✓ finished / ⚠ partial / ✗ failed) when it ends. Hidden while
+     * the panel is open — full detail (elapsed time, cost, which lines failed, time markers) lives in
+     * the Translate screen instead.
      */
     public View getIndicatorView() {
-        return USE_CHUNK_BAR_INDICATOR ? compactBar : indicator;
+        return USE_CHUNK_BAR_INDICATOR ? compactRow : indicator;
     }
 
     /** The full-detail bar for the Translate screen — same data, bigger, with time ticks and labels. */
@@ -146,15 +171,17 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         boolean show = !panelOpen && (showRunning || showTerminal);
 
         TranslationProgress p = lastProgress;
-        long watchable = (p != null) ? session.watchableUntilMs(currentPositionMs) : -1L;
         ChunkProgressBarView.Model model = (p != null)
-                ? timeline.buildModel(p, session, currentPositionMs, watchable)
+                ? timeline.buildModel(p, session, currentPositionMs)
                 : ChunkProgressBarView.Model.EMPTY;
         detailedBar.setModel(model);
 
         if (USE_CHUNK_BAR_INDICATOR) {
-            compactBar.setVisibility(show ? View.VISIBLE : View.GONE);
-            if (show) compactBar.setModel(model);
+            compactRow.setVisibility(show ? View.VISIBLE : View.GONE);
+            if (show) {
+                compactBar.setModel(model);
+                compactLabel.setText(compactSummary(p, model));
+            }
             return;
         }
 
@@ -617,6 +644,24 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
             sb.append(" — ").append(p.getUntranslatedEntries()).append(" lines kept in the original language");
             if (p.getReadyUntilMs() > 0) sb.append(" (ready up to ").append(formatDuration(p.getReadyUntilMs())).append(")");
         }
+        return sb.toString();
+    }
+
+    /**
+     * "42% · ETA 1:23" for the compact indicator's label, next to the bar — the bar alone (no text,
+     * see the design plan) doesn't answer "how much longer", so this fills that gap.
+     */
+    private String compactSummary(@Nullable TranslationProgress p, ChunkProgressBarView.Model model) {
+        if (p == null) return "";
+        StringBuilder sb = new StringBuilder().append(ChunkTimelineTracker.percentDone(model)).append("%");
+        long etaMs = -1L;
+        if (p.isStreaming() && p.getEtaMs() >= 0) {
+            etaMs = p.getEtaMs();
+        } else {
+            Long remaining = timeline.estimatedRemainingMs(p);
+            if (remaining != null) etaMs = remaining;
+        }
+        if (etaMs >= 0) sb.append(" · ETA ").append(formatDuration(etaMs));
         return sb.toString();
     }
 

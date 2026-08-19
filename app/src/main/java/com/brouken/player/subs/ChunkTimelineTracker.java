@@ -167,14 +167,9 @@ final class ChunkTimelineTracker {
         return (startMs >= 0 && endMs >= 0) ? new long[]{startMs, endMs} : null;
     }
 
-    /**
-     * Builds the drawable model for this tick.
-     *
-     * @param watchableUntilMs {@code session.watchableUntilMs(currentPositionMs)}, already computed by
-     *                         the caller; {@code -1} hides the watch band entirely (nothing to show yet)
-     */
+    /** Builds the drawable model for this tick, for {@code currentPositionMs} (the live playhead). */
     ChunkProgressBarView.Model buildModel(TranslationProgress progress, SubtitlePipelineSession session,
-                                          long currentPositionMs, long watchableUntilMs) {
+                                          long currentPositionMs) {
         if (totalDurationMs <= 0 || (backgroundBoundaries.isEmpty() && priorityBoundaries.isEmpty())) {
             return ChunkProgressBarView.Model.EMPTY;
         }
@@ -186,8 +181,44 @@ final class ChunkTimelineTracker {
         appendSegments(segments, backgroundBoundaries, 0L, true, active, progress, session);
         appendSegments(segments, priorityBoundaries, startAtMs, false, active, progress, session);
 
-        return new ChunkProgressBarView.Model(segments, totalDurationMs,
-                watchableUntilMs >= 0 ? currentPositionMs : -1L, watchableUntilMs);
+        long watchUntil = watchUntilFromSegments(segments, currentPositionMs);
+        return new ChunkProgressBarView.Model(segments, totalDurationMs, currentPositionMs, watchUntil);
+    }
+
+    /**
+     * Derives the "watchable from here" band directly from the segments just built, instead of an
+     * independent {@code session.watchableUntilMs(currentPositionMs)} query — guarantees the band can
+     * never visually extend past a segment that isn't drawn DONE. An independent query could disagree
+     * with what the segments show (found live: the band advancing over a still-translating/yellow
+     * segment) whenever its own per-position answer and a segment's own DONE check ended up looking
+     * at slightly different content — same underlying data, but two separate computations of it.
+     */
+    private static long watchUntilFromSegments(List<ChunkProgressBarView.Segment> segments, long fromMs) {
+        long watchUntil = fromMs;
+        for (ChunkProgressBarView.Segment seg : segments) {
+            if (seg.endMs <= fromMs) continue;
+            if (seg.startMs > watchUntil) break; // gap between zones — shouldn't happen, guard anyway
+            if (seg.state != ChunkProgressBarView.SegmentState.DONE) break;
+            watchUntil = Math.max(watchUntil, seg.endMs);
+        }
+        return watchUntil;
+    }
+
+    /**
+     * Rough ETA for the whole run to finish: chunks not yet completed times the average chunk
+     * duration measured so far in this run, divided by how many are translating in parallel right
+     * now. {@code null} until at least one chunk has completed (no baseline yet) — same honesty rule
+     * {@link #softProgressLabel} follows for a single chunk, applied to the whole run.
+     */
+    @Nullable
+    Long estimatedRemainingMs(TranslationProgress progress) {
+        if (completedChunkDurationsMs.isEmpty()) return null;
+        int remaining = Math.max(0, progress.getTotalChunks() - progress.getCompletedChunks());
+        if (remaining == 0) return 0L;
+        double avg = completedChunkDurationsMs.stream().mapToLong(Long::longValue).average().orElse(0);
+        if (avg <= 0) return null;
+        int parallelism = Math.max(1, progress.getActiveChunks().size());
+        return (long) Math.ceil(avg * remaining / parallelism);
     }
 
     private void appendSegments(List<ChunkProgressBarView.Segment> out, List<Boundary> list, long zoneStart,
@@ -266,6 +297,17 @@ final class ChunkTimelineTracker {
 
     private static float clamp01(float v) {
         return Math.max(0f, Math.min(1f, v));
+    }
+
+    /** Overall completion, 0-100 — the sum of DONE segment durations over the whole timeline, not a
+     *  chunk count (chunks vary wildly in duration, so "2/5 chunks" reads nothing like "2/5 of the video"). */
+    static int percentDone(ChunkProgressBarView.Model model) {
+        if (model.totalDurationMs <= 0) return 0;
+        long doneMs = 0;
+        for (ChunkProgressBarView.Segment seg : model.segments) {
+            if (seg.state == ChunkProgressBarView.SegmentState.DONE) doneMs += (seg.endMs - seg.startMs);
+        }
+        return (int) Math.round(100.0 * doneMs / model.totalDurationMs);
     }
 
     private static boolean overlaps(long aStart, long aEnd, long bStart, long bEnd) {
