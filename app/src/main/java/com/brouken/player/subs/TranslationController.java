@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.function.Consumer;
 
 import okhttp3.OkHttpClient;
+import subtitleengine.core.model.SubtitleEntry;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.pipeline.EntrySource;
 import subtitleengine.pipeline.SubtitlePipelineSession;
@@ -57,6 +58,17 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     private final Consumer<SubtitleFile> promoteToOverlay;
     private final SubtitlePipelineSession session;
     private final TextView indicator;
+    private final ChunkTimelineTracker timeline;
+    private final ChunkProgressBarView compactBar;
+    private final ChunkProgressBarView detailedBar;
+
+    /**
+     * Switches the corner indicator between the segmented chunk bar and the plain text it replaces.
+     * Kept as a flag (not a setting) so the old {@link #indicator}/{@link #renderIndicator} text path
+     * stays fully intact behind it — an easy revert if the new design doesn't hold up, with nothing to
+     * re-implement.
+     */
+    private static final boolean USE_CHUNK_BAR_INDICATOR = true;
 
     private static final long TERMINAL_FLASH_MS = 3000;
 
@@ -84,10 +96,12 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         this.promoteToOverlay = promoteToOverlay;
         // The engine's pricing cache defaults to ~/.subtitle-engine, which doesn't resolve to
         // anything writable on Android (see LESSONS.md) — point it at real app storage instead.
+        ChunkingConfig chunkingConfig = ChunkingConfig.defaults();
         SubtitleTranslator.setPricingCacheDir(context.getFilesDir());
         SubtitleTranslator translator = new SubtitleTranslator(buildClient(context));
-        this.session = new SubtitlePipelineSession(translator, ChunkingConfig.defaults(), 3,
+        this.session = new SubtitlePipelineSession(translator, chunkingConfig, 3,
                 mainHandler::post, this);
+        this.timeline = new ChunkTimelineTracker(chunkingConfig);
 
         indicator = new TextView(context);
         indicator.setTextColor(Color.WHITE);
@@ -97,25 +111,52 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         int pad = Math.round(8 * context.getResources().getDisplayMetrics().density);
         indicator.setPadding(pad, Math.round(pad * 0.6f), pad, Math.round(pad * 0.6f));
         indicator.setVisibility(View.GONE);
+
+        compactBar = new ChunkProgressBarView(context);
+        compactBar.setDetailed(false);
+        compactBar.setVisibility(View.GONE);
+
+        detailedBar = new ChunkProgressBarView(context);
+        detailedBar.setDetailed(true);
     }
 
     /**
-     * The top-right indicator: "Translating N/M" while a run is active, then a 3s result flash
-     * (✓ finished / ⚠ partial / ✗ failed) when it ends. Hidden while the panel is open — full
-     * detail (elapsed time, cost, which lines failed) lives in the Translate screen instead.
+     * The top-right indicator: the segmented chunk bar (see {@link #USE_CHUNK_BAR_INDICATOR}) or the
+     * text it replaces — "Translating N/M" while a run is active, then a 3s result flash (✓ finished /
+     * ⚠ partial / ✗ failed) when it ends. Hidden while the panel is open — full detail (elapsed time,
+     * cost, which lines failed, time markers) lives in the Translate screen instead.
      */
     public View getIndicatorView() {
-        return indicator;
+        return USE_CHUNK_BAR_INDICATOR ? compactBar : indicator;
+    }
+
+    /** The full-detail bar for the Translate screen — same data, bigger, with time ticks and labels. */
+    public View getDetailedBarView() {
+        return detailedBar;
     }
 
     /** Called every tick — mirrors {@link SubtitleSyncController#render}: hidden while the panel is open. */
-    public void renderIndicator(boolean panelOpen) {
+    public void renderIndicator(boolean panelOpen, long currentPositionMs) {
         if (indicatorTerminalText != null && System.currentTimeMillis() >= indicatorTerminalUntilMs) {
             indicatorTerminalText = null; // flash window elapsed
         }
 
         boolean showRunning = session.status() == RunStatus.RUNNING;
         boolean showTerminal = indicatorTerminalText != null;
+        boolean show = !panelOpen && (showRunning || showTerminal);
+
+        TranslationProgress p = lastProgress;
+        long watchable = (p != null) ? session.watchableUntilMs(currentPositionMs) : -1L;
+        ChunkProgressBarView.Model model = (p != null)
+                ? timeline.buildModel(p, session, currentPositionMs, watchable)
+                : ChunkProgressBarView.Model.EMPTY;
+        detailedBar.setModel(model);
+
+        if (USE_CHUNK_BAR_INDICATOR) {
+            compactBar.setVisibility(show ? View.VISIBLE : View.GONE);
+            if (show) compactBar.setModel(model);
+            return;
+        }
 
         if (panelOpen || (!showRunning && !showTerminal)) {
             if (indicator.getVisibility() != View.GONE) indicator.setVisibility(View.GONE);
@@ -126,15 +167,12 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         String text;
         if (showTerminal) {
             text = indicatorTerminalText;
+        } else if (p != null && p.isStreaming()) {
+            text = streamingSummary(p);
         } else {
-            TranslationProgress p = lastProgress;
-            if (p != null && p.isStreaming()) {
-                text = streamingSummary(p);
-            } else {
-                text = (p != null)
-                        ? "Translating " + p.getCompletedChunks() + "/" + p.getTotalChunks() + formatCostSoFar(p)
-                        : "Translating…";
-            }
+            text = (p != null)
+                    ? "Translating " + p.getCompletedChunks() + "/" + p.getTotalChunks() + formatCostSoFar(p)
+                    : "Translating…";
         }
         if (!text.contentEquals(indicator.getText())) indicator.setText(text);
     }
@@ -171,10 +209,10 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     }
 
     /** "Translate again": drops the stored translation first, or the rerun would just serve it back. */
-    public void translateAgain(long positionMs) {
+    public void translateAgain(long positionMs, long videoDurationMs) {
         session.forgetTranslation(targetLanguage());
         session.restoreOriginal();
-        start(positionMs);
+        start(positionMs, videoDurationMs);
     }
 
     /** Sets/replaces an already fully-known translatable source (external, provider, a fully-cached
@@ -186,6 +224,10 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         this.toastedForRun = false;
         this.lastProgress = null;
         this.indicatorTerminalText = null;
+        if (file == null) {
+            compactBar.setModel(ChunkProgressBarView.Model.EMPTY);
+            detailedBar.setModel(ChunkProgressBarView.Model.EMPTY);
+        }
         session.setSource(file, movieTitle);
         pushState();
     }
@@ -204,17 +246,21 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     }
 
     /**
-     * @param positionMs current playback position — entries at/after it are prioritized so the
-     *                   user can keep watching without gaps as soon as possible. Only affects an
-     *                   already fully-known source (see {@link SubtitlePipelineSession}'s class
-     *                   javadoc) — ignored for a streaming embedded extraction.
+     * @param positionMs     current playback position — entries at/after it are prioritized so the
+     *                       user can keep watching without gaps as soon as possible. Only affects an
+     *                       already fully-known source (see {@link SubtitlePipelineSession}'s class
+     *                       javadoc) — ignored for a streaming embedded extraction.
+     * @param videoDurationMs the video's total duration ({@code player.getDuration()}) — used only to
+     *                       lay out the chunk progress bar's estimated boundaries before any entry is
+     *                       known; the translation itself doesn't need it.
      */
-    public void start(long positionMs) {
+    public void start(long positionMs, long videoDurationMs) {
         if (!canTranslate()) return;
         toastedForRun = false;
         lastProgress = null;
         indicatorTerminalText = null;
 
+        List<SubtitleEntry> exactEntries = null;
         if (source == null && isExtractableSelected()) {
             EntrySource entrySource = embedded.entrySourceFor(selectedOption);
             if (entrySource == null) return; // isExtractableSelected() said yes but embedded disagreed
@@ -222,7 +268,9 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
             session.setSource(entrySource, selectedOption.language, movieTitle);
         } else {
             pendingSourcePromotion = false;
+            if (source != null) exactEntries = source.getEntries();
         }
+        timeline.reset(videoDurationMs, positionMs, exactEntries);
 
         session.start(targetLanguage(), positionMs);
         pushState();
@@ -233,11 +281,22 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
      * it synchronously (no worker thread, no network) and returns it — {@code null} if none, in which
      * case the caller should fall back to {@link #start}. See {@link SubtitlePipelineSession#loadCompleteFromCache}
      * for why this exists as a separate call instead of just always using {@link #start}.
+     *
+     * <p>This path never goes through {@link #onProgress} (the session applies the cache hit directly,
+     * with no listener callback), so the chunk bar would otherwise stay on whatever it last showed —
+     * empty on a fresh launch. Feeding the timeline a minimal synthetic DONE snapshot here is enough:
+     * every segment renders green for a DONE run regardless of its other fields (see
+     * {@code ChunkTimelineTracker}), so the exact preview from {@code exactEntries} is all it needs.
      */
     @Nullable
-    public SubtitleFile loadCompleteFromCache() {
+    public SubtitleFile loadCompleteFromCache(long videoDurationMs) {
         SubtitleFile result = session.loadCompleteFromCache(targetLanguage());
-        if (result != null) pushState();
+        if (result != null) {
+            timeline.reset(videoDurationMs, 0L, result.getEntries());
+            lastProgress = new TranslationProgress(RunStatus.DONE, 0, 0, 0, 0, 0, 0L, List.of(),
+                    null, null, null, false, null, 1.0, -1L, false, 0L, -1.0);
+            pushState();
+        }
         return result;
     }
 
@@ -338,6 +397,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
     @Override
     public void onSubtitleUpdated(SubtitleFile current) {
+        timeline.onSubtitleUpdated(current);
         if (pendingSourcePromotion) {
             pendingSourcePromotion = false;
             source = current;
@@ -358,6 +418,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     @Override
     public void onProgress(TranslationProgress progress) {
         lastProgress = progress;
+        timeline.onProgress(progress);
         logProgress(progress);
         pushState();
         maybeToast(progress);

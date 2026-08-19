@@ -129,6 +129,11 @@ public class SubtitlePanel extends FrameLayout
         styleSidebar();
     }
 
+    /** Hands the detailed chunk-progress bar to the Translate screen — see {@link TranslateView#setChunkBar}. */
+    public void setTranslateChunkBar(android.view.View bar) {
+        translateView.setChunkBar(bar);
+    }
+
     /**
      * Shows how far the read of an embedded track has got, on whichever screen asked for it. Passing
      * {@code null} clears it — the screens then go back to reporting their own state.

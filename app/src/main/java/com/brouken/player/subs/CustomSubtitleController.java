@@ -96,6 +96,7 @@ public class CustomSubtitleController
 
         translation = new TranslationController(context, sync, panel, embedded, handler, this::renderOverlay,
                 this::promoteEmbeddedToOverlay);
+        panel.setTranslateChunkBar(translation.getDetailedBarView());
         FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         ilp.gravity = Gravity.TOP | Gravity.END;
@@ -222,7 +223,7 @@ public class CustomSubtitleController
      * class javadoc). Everything else already has its {@code SubtitleFile} and starts immediately.
      */
     @Override public void onStartTranslate() {
-        translation.start(currentPositionMs());
+        translation.start(currentPositionMs(), player != null ? player.getDuration() : 0L);
     }
 
     @Override public void onCancelTranslate() { translation.cancel(); }
@@ -236,7 +237,9 @@ public class CustomSubtitleController
         selection.refresh(); // the "Translated" chip needs the option list re-evaluated to drop
     }
 
-    @Override public void onTranslateAgain() { translation.translateAgain(currentPositionMs()); }
+    @Override public void onTranslateAgain() {
+        translation.translateAgain(currentPositionMs(), player != null ? player.getDuration() : 0L);
+    }
 
     @Override public void onStartAutoSync(boolean fromHere) {
         if (needsExtraction()) {
@@ -365,11 +368,11 @@ public class CustomSubtitleController
             // (start() would still spin a worker thread just to do this same merge, visible as a flash
             // of the original first — confirmed live). Partial → nothing to show yet beyond the
             // original, so fall back to start(), which resumes translating exactly what's missing.
-            SubtitleFile cachedTranslation = translation.loadCompleteFromCache();
+            SubtitleFile cachedTranslation = translation.loadCompleteFromCache(player != null ? player.getDuration() : 0L);
             if (cachedTranslation != null) {
                 toShow = cachedTranslation;
             } else {
-                translation.start(currentPositionMs());
+                translation.start(currentPositionMs(), player != null ? player.getDuration() : 0L);
             }
         }
 
@@ -494,7 +497,7 @@ public class CustomSubtitleController
     private void tick() {
         if (!ticking) return;
         renderOverlay();
-        translation.renderIndicator(panel.isOpen());
+        translation.renderIndicator(panel.isOpen(), currentPositionMs());
         autoSync.renderIndicator(panel.isOpen());
         panel.onTick(currentPositionMs());
         handler.postDelayed(this::tick, POLL_MS);

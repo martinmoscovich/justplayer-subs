@@ -51,6 +51,7 @@ public class TranslateView extends FrameLayout {
     }
 
     private final TextView statusView;
+    private final FrameLayout chunkBarHost;
     private final TextView reasonView;
     private final LinearLayout buttonRow;
 
@@ -67,9 +68,27 @@ public class TranslateView extends FrameLayout {
     public TranslateView(Context context) {
         super(context);
 
+        LinearLayout topBlock = new LinearLayout(context);
+        topBlock.setOrientation(LinearLayout.VERTICAL);
+        FrameLayout.LayoutParams topBlockLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        topBlockLp.gravity = Gravity.TOP | Gravity.START;
+        addView(topBlock, topBlockLp);
+
         statusView = label(16, COLOR_NORMAL);
         statusView.setPadding(dp(24), dp(24), dp(24), dp(8));
-        addView(statusView, lp(Gravity.TOP | Gravity.START, 0, 0));
+        topBlock.addView(statusView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // Empty until TranslationController hands over its detailed chunk bar via setChunkBar() —
+        // it's constructed after this view, in CustomSubtitleController's constructor.
+        chunkBarHost = new FrameLayout(context);
+        LinearLayout.LayoutParams chunkBarLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        chunkBarLp.leftMargin = dp(24);
+        chunkBarLp.rightMargin = dp(24);
+        chunkBarLp.topMargin = dp(4);
+        topBlock.addView(chunkBarHost, chunkBarLp);
 
         reasonView = label(15, COLOR_REASON);
         reasonView.setGravity(Gravity.CENTER);
@@ -91,6 +110,14 @@ public class TranslateView extends FrameLayout {
 
     public void setListener(Listener l) {
         this.listener = l;
+    }
+
+    /** Hands over {@link TranslationController#getDetailedBarView()} — called once, after this view
+     *  and {@code TranslationController} both exist (see {@code CustomSubtitleController}'s constructor). */
+    public void setChunkBar(android.view.View bar) {
+        chunkBarHost.removeAllViews();
+        chunkBarHost.addView(bar, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /**
