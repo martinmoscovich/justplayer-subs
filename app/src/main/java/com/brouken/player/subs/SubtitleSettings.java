@@ -55,6 +55,16 @@ public final class SubtitleSettings {
         }
     }
 
+    /**
+     * Reads an API key, trimmed. A key pasted with a stray space or newline (or scanned into the
+     * QR setup that way) is otherwise sent verbatim in the {@code Authorization} header, and the
+     * provider rejects it with a 401 that looks exactly like a wrong key — see LESSONS.md.
+     */
+    public static String getApiKey(Context c, String key) {
+        String s = getString(c, key, "");
+        return s == null ? "" : s.trim();
+    }
+
     public static Set<String> getStringSet(Context c, String key) {
         return prefs(c).getStringSet(key, Collections.emptySet());
     }

@@ -27,6 +27,9 @@ public class TranslateView extends FrameLayout {
     public interface Listener {
         void onStartTranslate();
         void onCancelTranslate();
+        /** Freeze the run without discarding what it already produced. */
+        void onPauseTranslate();
+        void onResumeTranslate();
         void onRestoreOriginal();
         /** Finished row: drop the cached translation and pay for a fresh one. */
         void onTranslateAgain();
@@ -236,6 +239,14 @@ public class TranslateView extends FrameLayout {
                 buttons.add(new Btn("Done", this::requestClose));
                 break;
             case RUNNING:
+                // Pause first and focused: it is the reversible one. Cancel throws away the partial
+                // translation the run has already paid for, so it must not be what a stray press hits.
+                buttons.add(new Btn("Pause", this::pauseTranslate));
+                buttons.add(new Btn("Cancel", this::cancelTranslate));
+                buttons.add(new Btn("Done", this::requestClose));
+                break;
+            case PAUSED:
+                buttons.add(new Btn("Resume", this::resumeTranslate));
                 buttons.add(new Btn("Cancel", this::cancelTranslate));
                 buttons.add(new Btn("Done", this::requestClose));
                 break;
@@ -301,6 +312,14 @@ public class TranslateView extends FrameLayout {
 
     private void cancelTranslate() {
         if (listener != null) listener.onCancelTranslate();
+    }
+
+    private void pauseTranslate() {
+        if (listener != null) listener.onPauseTranslate();
+    }
+
+    private void resumeTranslate() {
+        if (listener != null) listener.onResumeTranslate();
     }
 
     private void translateAgain() {

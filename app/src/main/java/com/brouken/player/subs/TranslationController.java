@@ -19,18 +19,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
 
-import okhttp3.OkHttpClient;
 import subtitleengine.core.model.SubtitleEntry;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.pipeline.EntrySource;
 import subtitleengine.pipeline.SubtitlePipelineSession;
 import subtitleengine.translation.ChunkProgress;
 import subtitleengine.translation.ChunkingConfig;
-import subtitleengine.translation.GeminiClient;
-import subtitleengine.translation.OpenRouterClient;
 import subtitleengine.translation.RunStatus;
 import subtitleengine.translation.SubtitleTranslator;
-import subtitleengine.translation.TranslationClient;
 import subtitleengine.translation.TranslationProgress;
 import subtitleengine.translation.TranslationStats;
 
@@ -59,6 +55,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     private final Runnable renderOverlay;
     private final EmbeddedSubtitleController embedded;
     private final Consumer<SubtitleFile> promoteToOverlay;
+    private final SettingsTranslationClient client;
     private final SubtitlePipelineSession session;
     private final TextView indicator;
     private final ChunkTimelineTracker timeline;
@@ -103,7 +100,8 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         // anything writable on Android (see LESSONS.md) — point it at real app storage instead.
         ChunkingConfig chunkingConfig = ChunkingConfig.defaults();
         SubtitleTranslator.setPricingCacheDir(context.getFilesDir());
-        SubtitleTranslator translator = new SubtitleTranslator(buildClient(context));
+        this.client = new SettingsTranslationClient(context);
+        SubtitleTranslator translator = new SubtitleTranslator(client);
         this.session = new SubtitlePipelineSession(translator, chunkingConfig, 3,
                 mainHandler::post, this);
         this.timeline = new ChunkTimelineTracker(chunkingConfig);
@@ -166,7 +164,10 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
             indicatorTerminalText = null; // flash window elapsed
         }
 
-        boolean showRunning = session.status() == RunStatus.RUNNING;
+        // A paused run keeps its indicator: it is frozen, not finished, and the only cue that work is
+        // still parked (and still costing nothing) once the panel is closed.
+        RunStatus runStatus = session.status();
+        boolean showRunning = runStatus == RunStatus.RUNNING || runStatus == RunStatus.PAUSED;
         boolean showTerminal = indicatorTerminalText != null;
         boolean show = !panelOpen && (showRunning || showTerminal);
 
@@ -283,6 +284,9 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
      */
     public void start(long positionMs, long videoDurationMs) {
         if (!canTranslate()) return;
+        // Pick up a provider/model/key edited since the last run. Here and not per completion: a run
+        // must not change model halfway through. See SettingsTranslationClient.
+        client.refresh();
         toastedForRun = false;
         lastProgress = null;
         indicatorTerminalText = null;
@@ -329,6 +333,18 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
     public void cancel() {
         session.cancel();
+    }
+
+    /** Freezes the run, keeping everything it already produced — see
+     *  {@link SubtitlePipelineSession#pause()}. */
+    public void pause() {
+        session.pause();
+        pushState();
+    }
+
+    public void resume() {
+        session.resume();
+        pushState();
     }
 
     public void restoreOriginal() {
@@ -397,7 +413,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     }
 
     private boolean hasApiKey() {
-        return !TextUtils.isEmpty(SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_API_KEY, null));
+        return !TextUtils.isEmpty(SubtitleSettings.getApiKey(context, SubtitleSettings.KEY_AI_API_KEY));
     }
 
     /** Package-visible: {@link CustomSubtitleController} needs this to check the translation cache
@@ -409,16 +425,6 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         return TextUtils.isEmpty(dev) ? "en" : dev;
     }
 
-    private static TranslationClient buildClient(Context context) {
-        String provider = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER, "openrouter");
-        String model = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_MODEL, "google/gemini-2.5-flash");
-        String apiKey = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_API_KEY, "");
-        OkHttpClient http = new OkHttpClient();
-        if ("gemini".equals(provider)) {
-            return new GeminiClient(apiKey, model, http);
-        }
-        return new OpenRouterClient(apiKey, model, http);
-    }
 
     // --- SubtitlePipelineSession.Listener ---
 
@@ -499,6 +505,8 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         switch (status) {
             case RUNNING:
                 return ButtonState.RUNNING;
+            case PAUSED:
+                return ButtonState.PAUSED;
             case DONE:
                 return (p != null && (p.getFailedChunks() > 0 || p.getUntranslatedEntries() > 0))
                         ? ButtonState.FINISHED_WARNING : ButtonState.FINISHED_OK;
@@ -532,6 +540,17 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
                 running.append(formatCostSoFar(p));
                 appendActiveChunks(running, p);
                 return running.toString();
+            case PAUSED:
+                // Says what survives the pause, because that is the whole difference from Cancel.
+                StringBuilder paused = new StringBuilder("Paused");
+                if (p != null) {
+                    if (p.getReadyUntilMs() > 0) {
+                        paused.append(" · ").append(formatDuration(p.getReadyUntilMs())).append(" translated");
+                    }
+                    paused.append(formatCostSoFar(p));
+                }
+                paused.append(" · kept — Resume to continue");
+                return paused.toString();
             case DONE:
                 return formatDone(p);
             case CANCELLED:

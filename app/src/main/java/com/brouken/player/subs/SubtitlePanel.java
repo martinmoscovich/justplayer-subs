@@ -39,6 +39,8 @@ public class SubtitlePanel extends FrameLayout
         void onOpenSettings();
         void onStartTranslate();
         void onCancelTranslate();
+        void onPauseTranslate();
+        void onResumeTranslate();
         void onRestoreOriginal();
         void onTranslateAgain();
         void onStartAutoSync(boolean fromHere);
@@ -292,6 +294,8 @@ public class SubtitlePanel extends FrameLayout
 
     @Override public void onStartTranslate() { if (callbacks != null) callbacks.onStartTranslate(); }
     @Override public void onCancelTranslate() { if (callbacks != null) callbacks.onCancelTranslate(); }
+    @Override public void onPauseTranslate() { if (callbacks != null) callbacks.onPauseTranslate(); }
+    @Override public void onResumeTranslate() { if (callbacks != null) callbacks.onResumeTranslate(); }
     @Override public void onRestoreOriginal() { if (callbacks != null) callbacks.onRestoreOriginal(); }
     @Override public void onTranslateAgain() { if (callbacks != null) callbacks.onTranslateAgain(); }
 

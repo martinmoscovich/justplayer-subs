@@ -207,7 +207,7 @@ public class SubtitleSelectionController {
     }
 
     private String downloadProviderContent(SubtitleOption opt) throws SubtitleError.ProviderError {
-        String apiKey = SubtitleSettings.getString(context, SubtitleSettings.KEY_OPENSUBTITLES, "");
+        String apiKey = SubtitleSettings.getApiKey(context, SubtitleSettings.KEY_OPENSUBTITLES);
         SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
         return provider.download(opt.providerRef).getContent();
     }
@@ -542,7 +542,7 @@ public class SubtitleSelectionController {
 
     private void maybeSearchProvider() {
         if (providerSearched) return;
-        String apiKey = SubtitleSettings.getString(context, SubtitleSettings.KEY_OPENSUBTITLES, null);
+        String apiKey = SubtitleSettings.getApiKey(context, SubtitleSettings.KEY_OPENSUBTITLES);
         if (TextUtils.isEmpty(apiKey)) return; // no key configured → no provider search
         String title = mediaTitle();
         if (TextUtils.isEmpty(title)) return;

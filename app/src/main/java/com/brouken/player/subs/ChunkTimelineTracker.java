@@ -181,27 +181,7 @@ final class ChunkTimelineTracker {
         appendSegments(segments, backgroundBoundaries, 0L, true, active, progress, session);
         appendSegments(segments, priorityBoundaries, startAtMs, false, active, progress, session);
 
-        long watchUntil = watchUntilFromSegments(segments, currentPositionMs);
-        return new ChunkProgressBarView.Model(segments, totalDurationMs, currentPositionMs, watchUntil);
-    }
-
-    /**
-     * Derives the "watchable from here" band directly from the segments just built, instead of an
-     * independent {@code session.watchableUntilMs(currentPositionMs)} query — guarantees the band can
-     * never visually extend past a segment that isn't drawn DONE. An independent query could disagree
-     * with what the segments show (found live: the band advancing over a still-translating/yellow
-     * segment) whenever its own per-position answer and a segment's own DONE check ended up looking
-     * at slightly different content — same underlying data, but two separate computations of it.
-     */
-    private static long watchUntilFromSegments(List<ChunkProgressBarView.Segment> segments, long fromMs) {
-        long watchUntil = fromMs;
-        for (ChunkProgressBarView.Segment seg : segments) {
-            if (seg.endMs <= fromMs) continue;
-            if (seg.startMs > watchUntil) break; // gap between zones — shouldn't happen, guard anyway
-            if (seg.state != ChunkProgressBarView.SegmentState.DONE) break;
-            watchUntil = Math.max(watchUntil, seg.endMs);
-        }
-        return watchUntil;
+        return new ChunkProgressBarView.Model(segments, totalDurationMs, currentPositionMs);
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.brouken.player.subs;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -45,6 +46,22 @@ public class CustomSubtitleController
     private final AutoSyncController autoSync;
     private final SubtitleNoticeView notice;
     private final EmbeddedSubtitleController embedded;
+    /**
+     * Makes a settings change take effect on the running player instead of only on the next playback:
+     * the sync session captured its {@link subtitleengine.sync.SyncSettings} at construction, and the
+     * option rows show language-dependent grouping and chips.
+     *
+     * <p>A prefs listener rather than a hook on returning from {@link SubtitleSettingsActivity},
+     * because that screen is not the only writer — the QR setup writes the same prefs from inside the
+     * player. Kept in a field because {@code SharedPreferences} holds only a weak reference to its
+     * listeners: an inline lambda would be collected and silently stop firing. Fires on whichever
+     * thread wrote the pref, hence the hop to the main thread.
+     *
+     * <p>The translation client is deliberately not refreshed here — it re-reads at the start of each
+     * run, so a run in flight can't change model or key halfway (see {@link SettingsTranslationClient}).
+     */
+    private final SharedPreferences.OnSharedPreferenceChangeListener settingsListener =
+            (prefs, key) -> handler.post(this::onSettingsChanged);
     private boolean ticking;
     @Nullable private Uri mediaUri;
     /** The option currently selected, kept so the Translate/Sync screens know what they are acting on. */
@@ -126,6 +143,14 @@ public class CustomSubtitleController
         selection.setCache(embedded.cache()); // one store for every kind of subtitle
         // After `selection` exists: the hash releases the provider search, which matches on it.
         embedded.setOnHashReady(sizeBytes -> selection.onMediaHash(embedded.videoHash(), sizeBytes));
+
+        SubtitleSettings.prefs(context).registerOnSharedPreferenceChangeListener(settingsListener);
+    }
+
+    /** See {@link #settingsListener}. Always on the main thread. */
+    private void onSettingsChanged() {
+        sync.reloadSettings(context);
+        selection.refresh();
     }
 
     public void onMediaSet(@Nullable Uri mediaUri,
@@ -165,6 +190,7 @@ public class CustomSubtitleController
 
     public void release() {
         ticking = false;
+        SubtitleSettings.prefs(context).unregisterOnSharedPreferenceChangeListener(settingsListener);
         handler.removeCallbacksAndMessages(null);
         translation.release();
         autoSync.release();
@@ -227,6 +253,10 @@ public class CustomSubtitleController
     }
 
     @Override public void onCancelTranslate() { translation.cancel(); }
+
+    @Override public void onPauseTranslate() { translation.pause(); }
+
+    @Override public void onResumeTranslate() { translation.resume(); }
 
     // Discards the cached translation too — "Restore Original" reading as final, not as "hide it for
     // now": leaving a translated chip on screen after explicitly asking for the original back would

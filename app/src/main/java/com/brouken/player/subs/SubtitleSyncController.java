@@ -43,6 +43,15 @@ public class SubtitleSyncController {
     }
 
     /**
+     * Re-reads the sync settings (reaction, nudge, seek, segment gap/restart) into the live session,
+     * so an edit in Settings applies to the next anchor/nudge/jump instead of only to the next
+     * playback. The sync state (anchors, nudges) survives.
+     */
+    public void reloadSettings(Context context) {
+        session.setSettings(SubtitleSettings.syncSettings(context));
+    }
+
+    /**
      * Caps the overlay width so a long cue wraps instead of stretching across the whole video. The
      * coordinator feeds the player view's width, since the cap has to follow the surface size
      * (fullscreen vs PiP, and every resize) rather than a fixed dp value.

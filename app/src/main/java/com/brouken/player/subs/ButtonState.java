@@ -7,7 +7,8 @@ package com.brouken.player.subs;
  */
 public enum ButtonState {
     IDLE,               // "Translate" · "Done" — Translate focused
-    RUNNING,            // "Cancel" · "Done" — Cancel focused
+    RUNNING,            // "Pause" · "Cancel" · "Done" — Pause focused
+    PAUSED,             // "Resume" · "Cancel" · "Done" — Resume focused; run frozen, nothing lost
     FINISHED_OK,        // "Done" · "Restore original" — Done focused, normal status color
     FINISHED_WARNING,   // same row — partial result, warning status color
     FINISHED_ERROR,     // same row — run failed outright, error status color
