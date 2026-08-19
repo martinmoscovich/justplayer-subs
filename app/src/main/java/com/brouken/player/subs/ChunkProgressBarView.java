@@ -17,6 +17,8 @@ import androidx.annotation.Nullable;
 import java.util.List;
 import java.util.Locale;
 
+import com.brouken.player.subs.ui.SubsTheme;
+
 /**
  * Draws the chunk-progress timeline described in the design plan: one horizontal segment per
  * translation chunk, colored by state, plus a playhead marker and (in {@link #setDetailed detailed}
@@ -85,6 +87,8 @@ public class ChunkProgressBarView extends View {
     private static final float GAP_DP = 6f;
     /** Room under the bar for the lower half of the alternating tick labels. */
     private static final float TICK_AREA_BELOW_DP = 30f;
+    private static final float RADIUS_DETAILED_DP = 8f;
+    private static final float RADIUS_COMPACT_DP = 4f;
 
     private boolean detailed = false;
     private Model model = Model.EMPTY;
@@ -95,17 +99,22 @@ public class ChunkProgressBarView extends View {
     private final Paint tickTextPaint = new Paint();
     private final Paint tickLinePaint = new Paint();
     private final Paint playheadPaint = new Paint();
+    private final Paint playheadHaloPaint = new Paint();
+    private final Paint railPaint = new Paint();
     private final Paint labelPaint = new Paint();
     private final RectF rect = new RectF();
+    private final RectF barRect = new RectF();
+    private final android.graphics.Path clipPath = new android.graphics.Path();
+    private final android.graphics.Path playheadTip = new android.graphics.Path();
 
-    // Fixed semantic colors — not theme-dependent, see the design plan's legend.
-    private static final int COLOR_PENDING = 0xFF22303F;
-    private static final int COLOR_EXTRACTING = 0xFF52626F;
-    private static final int COLOR_CLOSED = 0xFFF4F7F9;
-    private static final int COLOR_TRANSLATING = 0xFFE8B93F;
-    private static final int COLOR_DONE = 0xFF4FBF7A;
-    private static final int COLOR_FAILED = 0xFFD9584F;
-    private static final int COLOR_ACCENT = 0xFF4FB8C9;
+    // The bar's seven semantic colours. They are the one part of the palette that is never reused
+    // anywhere else in the panel, which is what lets the legend above the bar be read as a key.
+    private static final int COLOR_PENDING = SubsTheme.STATUS_PENDING;
+    private static final int COLOR_EXTRACTING = SubsTheme.STATUS_EXTRACTING;
+    private static final int COLOR_CLOSED = SubsTheme.STATUS_CLOSED;
+    private static final int COLOR_TRANSLATING = SubsTheme.STATUS_TRANSLATING;
+    private static final int COLOR_DONE = SubsTheme.STATUS_DONE;
+    private static final int COLOR_FAILED = SubsTheme.STATUS_FAILED;
 
     public ChunkProgressBarView(Context context) {
         this(context, null);
@@ -120,18 +129,31 @@ public class ChunkProgressBarView extends View {
         tickLinePaint.setAntiAlias(true);
         playheadPaint.setAntiAlias(true);
         labelPaint.setAntiAlias(true);
-        borderPaint.setColor(0x33000000);
+        // The divider between two segments is a hole punched in the bar, not a line drawn over it:
+        // it has to read the same over green, amber and the near-white CLOSED.
+        borderPaint.setColor(0xA60E1416);
         borderPaint.setStrokeWidth(dp(1));
-        hatchPaint.setColor(0x33FFFFFF);
+        hatchPaint.setColor(0x38FFFFFF); // 22% white, per the design's hatch
         hatchPaint.setStrokeWidth(dp(1));
-        tickTextPaint.setColor(0xFFB0BEC5);
-        tickTextPaint.setTextSize(spToPx(15));
-        tickLinePaint.setColor(0xFF223040);
+        tickTextPaint.setColor(SubsTheme.INK_3);
+        tickTextPaint.setTextSize(spToPx(SubsTheme.LABEL_SM_SP));
+        tickTextPaint.setTypeface(SubsTheme.bold(context));
+        tickTextPaint.setLetterSpacing(SubsTheme.LABEL_SM_TRACK);
+        tickLinePaint.setColor(SubsTheme.SURFACE_4);
         tickLinePaint.setStrokeWidth(dp(1));
-        playheadPaint.setColor(COLOR_ACCENT);
-        playheadPaint.setStrokeWidth(dp(2));
-        labelPaint.setColor(0xFF10151A);
-        labelPaint.setTextSize(spToPx(13));
+        railPaint.setColor(SubsTheme.SURFACE_4);
+        // White core over a black halo: the playhead has to be legible on all seven segment colours,
+        // and one of them (CLOSED) is itself near-white. Contrast by luminance in both directions,
+        // not by hue.
+        playheadPaint.setColor(SubsTheme.INK);
+        playheadPaint.setStrokeWidth(dp(3));
+        playheadHaloPaint.setColor(0xFF05090A);
+        playheadHaloPaint.setStrokeWidth(dp(5));
+        playheadHaloPaint.setAntiAlias(true);
+        labelPaint.setColor(SubsTheme.ON_SECONDARY);
+        labelPaint.setTextSize(spToPx(SubsTheme.LABEL_SM_SP));
+        labelPaint.setTypeface(SubsTheme.bold(context));
+        labelPaint.setLetterSpacing(SubsTheme.LABEL_SM_TRACK);
         labelPaint.setTextAlign(Paint.Align.CENTER);
     }
 
@@ -169,6 +191,16 @@ public class ChunkProgressBarView extends View {
         float barTop = detailed ? dp(TICK_AREA_DP) : 0f;
         float barThick = detailed ? dp(BAR_THICK_DETAILED_DP) : dp(BAR_THICK_COMPACT_DP);
         float barBottom = barTop + barThick;
+        float radius = dp(detailed ? RADIUS_DETAILED_DP : RADIUS_COMPACT_DP);
+
+        // The rail shows through wherever the segments do not reach — the same surface a scrollbar
+        // track uses, so an unstarted run still reads as a bar rather than as nothing.
+        barRect.set(0, barTop, w, barBottom);
+        canvas.drawRoundRect(barRect, radius, radius, railPaint);
+        canvas.save();
+        clipPath.reset();
+        clipPath.addRoundRect(barRect, radius, radius, android.graphics.Path.Direction.CW);
+        canvas.clipPath(clipPath);
 
         long phase = SystemClock.uptimeMillis() % PULSE_PERIOD_MS;
         float pulse = pulseFactor(phase); // 0..1..0 triangular wave
@@ -220,14 +252,16 @@ public class ChunkProgressBarView extends View {
 
             if (detailed && seg.label != null) {
                 float textWidth = labelPaint.measureText(seg.label);
+                // Only if it fits: an omitted number beats one bleeding over its own segment's edges.
                 if (right - left > textWidth + dp(8)) {
-                    canvas.drawText(seg.label, (left + right) / 2f, barBottom - dp(9), labelPaint);
+                    labelPaint.setColor(isDarkSegment(seg.state) ? SubsTheme.INK_2 : SubsTheme.ON_SECONDARY);
+                    canvas.drawText(seg.label, (left + right) / 2f,
+                            (barTop + barBottom) / 2f + dp(4), labelPaint);
                 }
             }
         }
 
-        // Left edge of the bar (0:00-equivalent start) — always a plain divider, drawn once.
-        canvas.drawLine(0, barTop, 0, barBottom, borderPaint);
+        canvas.restore();
 
         if (detailed) {
             drawTicks(canvas, segments, total, w, barTop, barBottom);
@@ -304,9 +338,22 @@ public class ChunkProgressBarView extends View {
      */
     private void drawPlayhead(Canvas canvas, long total, int w, float barTop, float barBottom) {
         float x = xFor(model.currentPositionMs, total, w);
+        canvas.drawLine(x, barTop, x, barBottom, playheadHaloPaint);
         canvas.drawLine(x, barTop, x, barBottom, playheadPaint);
-        float r = dp(detailed ? 4f : 2.5f);
-        canvas.drawCircle(x, barTop - r, r, playheadPaint);
+        if (!detailed) return;
+        // A tip below the bar, so the marker still reads at a glance when the line itself is sitting
+        // on a segment of a similar tone.
+        float half = dp(6), h = dp(8);
+        playheadTip.reset();
+        playheadTip.moveTo(x - half, barBottom);
+        playheadTip.lineTo(x + half, barBottom);
+        playheadTip.lineTo(x, barBottom + h);
+        playheadTip.close();
+        playheadHaloPaint.setStyle(Paint.Style.STROKE);
+        canvas.drawPath(playheadTip, playheadHaloPaint);
+        playheadPaint.setStyle(Paint.Style.FILL);
+        canvas.drawPath(playheadTip, playheadPaint);
+        playheadPaint.setStyle(Paint.Style.STROKE);
     }
 
     private void drawHatch(Canvas canvas, float left, float top, float right, float bottom) {
@@ -322,6 +369,11 @@ public class ChunkProgressBarView extends View {
     private Paint dashedBorder() {
         borderPaint.setPathEffect(new DashPathEffect(new float[]{dp(3), dp(3)}, 0));
         return borderPaint;
+    }
+
+    /** Whether a segment's fill is dark enough that ink on it has to be light rather than near-black. */
+    private static boolean isDarkSegment(SegmentState state) {
+        return state == SegmentState.PENDING || state == SegmentState.EXTRACTING;
     }
 
     private static float xFor(long ms, long total, int w) {

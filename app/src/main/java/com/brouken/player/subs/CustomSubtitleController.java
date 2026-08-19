@@ -271,6 +271,10 @@ public class CustomSubtitleController
         translation.translateAgain(currentPositionMs(), player != null ? player.getDuration() : 0L);
     }
 
+    @Override public void onRetryMissing() {
+        translation.retryMissing(currentPositionMs(), player != null ? player.getDuration() : 0L);
+    }
+
     @Override public void onStartAutoSync(boolean fromHere) {
         if (needsExtraction()) {
             SubtitleOption requested = selectedOption;
@@ -328,8 +332,8 @@ public class CustomSubtitleController
         activateOverlay(current, embedded.keyFor(selectedOption));
     }
 
-    private void onExtractionStatus(@Nullable String status) {
-        panel.setExtractionStatus(status);
+    private void onExtractionStatus(@Nullable String title, float fraction) {
+        panel.setExtractionStatus(title, fraction);
     }
 
     /**

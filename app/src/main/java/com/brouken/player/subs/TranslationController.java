@@ -19,12 +19,17 @@ import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
 
+import com.brouken.player.R;
+import com.brouken.player.subs.ui.SubsPill;
+import com.brouken.player.subs.ui.SubsTheme;
+
 import subtitleengine.core.model.SubtitleEntry;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.pipeline.EntrySource;
 import subtitleengine.pipeline.SubtitlePipelineSession;
 import subtitleengine.translation.ChunkProgress;
 import subtitleengine.translation.ChunkingConfig;
+import subtitleengine.translation.CostProjection;
 import subtitleengine.translation.RunStatus;
 import subtitleengine.translation.SubtitleTranslator;
 import subtitleengine.translation.TranslationProgress;
@@ -59,9 +64,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     private final SubtitlePipelineSession session;
     private final TextView indicator;
     private final ChunkTimelineTracker timeline;
-    private final ChunkProgressBarView compactBar;
-    private final TextView compactLabel;
-    private final View compactRow;
+    private final SubsPill compactRow;
     private final ChunkProgressBarView detailedBar;
 
     /**
@@ -115,28 +118,9 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         indicator.setPadding(pad, Math.round(pad * 0.6f), pad, Math.round(pad * 0.6f));
         indicator.setVisibility(View.GONE);
 
-        compactBar = new ChunkProgressBarView(context);
-        compactBar.setDetailed(false);
-
-        compactLabel = new TextView(context);
-        compactLabel.setTextColor(Color.WHITE);
-        compactLabel.setShadowLayer(4f, 0f, 0f, Color.BLACK);
-        compactLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-        int labelMargin = Math.round(8 * context.getResources().getDisplayMetrics().density);
-
-        LinearLayout row = new LinearLayout(context);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackgroundColor(0x99000000);
-        row.setPadding(pad, Math.round(pad * 0.6f), pad, Math.round(pad * 0.6f));
-        row.addView(compactBar, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        labelLp.leftMargin = labelMargin;
-        row.addView(compactLabel, labelLp);
-        row.setVisibility(View.GONE);
-        compactRow = row;
+        // The glyph sits after the text: this pill lives at the top-right of the screen, and an
+        // icon on the outer edge reads as pointing off it.
+        compactRow = new SubsPill(context, R.drawable.subtitle_ic_translate, SubsTheme.PRIMARY, true);
 
         detailedBar = new ChunkProgressBarView(context);
         detailedBar.setDetailed(true);
@@ -158,6 +142,16 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         return detailedBar;
     }
 
+    /**
+     * The last playhead position and the bar model built for it. The Translate screen's headline
+     * figure — how far you can keep watching <em>from where you are</em> — moves with playback, not
+     * just with the run, so it has to be recomputed on the tick as well as on every chunk that
+     * closes. Both are captured in {@link #renderIndicator}, which is the one call that already
+     * happens on every tick and already knows the position.
+     */
+    private long lastPositionMs;
+    private ChunkProgressBarView.Model lastModel = ChunkProgressBarView.Model.EMPTY;
+
     /** Called every tick — mirrors {@link SubtitleSyncController#render}: hidden while the panel is open. */
     public void renderIndicator(boolean panelOpen, long currentPositionMs) {
         if (indicatorTerminalText != null && System.currentTimeMillis() >= indicatorTerminalUntilMs) {
@@ -176,12 +170,18 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
                 ? timeline.buildModel(p, session, currentPositionMs)
                 : ChunkProgressBarView.Model.EMPTY;
         detailedBar.setModel(model);
+        lastPositionMs = currentPositionMs;
+        lastModel = model;
+        // While the panel is up and something is running, the second line of WATCHABLE UP TO counts
+        // down in real time — that is the whole point of measuring it from the playhead.
+        if (panelOpen && showRunning) pushState();
 
         if (USE_CHUNK_BAR_INDICATOR) {
             compactRow.setVisibility(show ? View.VISIBLE : View.GONE);
             if (show) {
-                compactBar.setModel(model);
-                compactLabel.setText(compactSummary(p, model));
+                compactRow.set(indicatorTerminalText != null ? null : "TRANSLATING",
+                        indicatorTerminalText != null ? indicatorTerminalText : compactSummary(p, model),
+                        ChunkTimelineTracker.miniCells(model, 6));
             }
             return;
         }
@@ -236,6 +236,17 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         pushState();
     }
 
+    /**
+     * "Retry missing lines": start again <em>without</em> dropping the stored translation, so the
+     * session's cache pass reuses every chunk that already succeeded and only the ones that failed
+     * are sent (and paid for) a second time. The whole difference from {@link #translateAgain} is the
+     * missing {@code forgetTranslation} — which is also why it destroys nothing and is allowed to
+     * hold the default focus on the partial-result screen.
+     */
+    public void retryMissing(long positionMs, long videoDurationMs) {
+        start(positionMs, videoDurationMs);
+    }
+
     /** "Translate again": drops the stored translation first, or the rerun would just serve it back. */
     public void translateAgain(long positionMs, long videoDurationMs) {
         session.forgetTranslation(targetLanguage());
@@ -253,7 +264,6 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         this.lastProgress = null;
         this.indicatorTerminalText = null;
         if (file == null) {
-            compactBar.setModel(ChunkProgressBarView.Model.EMPTY);
             detailedBar.setModel(ChunkProgressBarView.Model.EMPTY);
         }
         session.setSource(file, movieTitle);
@@ -494,10 +504,233 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     private void pushState() {
         RunStatus status = session.status();
         boolean available = canTranslate();
-        String reason = reasonUnavailable();
-        String statusText = formatStatus(status, lastProgress);
         ButtonState buttons = buttonStateFor(available, status, lastProgress);
-        panel.setTranslateState(available, reason, statusText, buttons);
+        panel.setTranslateState(available, buildUiState(status, buttons, lastProgress));
+    }
+
+    /**
+     * Turns the run's numbers into the three or four things the screen says. Everything the chunk bar
+     * can already show — how many are in flight, which failed, that something is translating right
+     * now — is deliberately absent: it is drawn, not written.
+     */
+    private TranslateUiState buildUiState(RunStatus status, ButtonState buttons,
+                                          @Nullable TranslationProgress p) {
+        switch (buttons) {
+            case UNAVAILABLE:
+                String reason = reasonUnavailable();
+                return TranslateUiState.of(TranslateUiState.Mode.UNAVAILABLE, buttons)
+                        .block("Translation unavailable", reason)
+                        .build();
+            case IDLE:
+                return TranslateUiState.of(TranslateUiState.Mode.IDLE, buttons)
+                        .block("Translate to " + targetLanguageName(), idleSubline())
+                        .build();
+            case RUNNING:
+                return runningState(buttons, p);
+            case PAUSED:
+                return pausedState(buttons, p);
+            default:
+                return finishedState(buttons, p);
+        }
+    }
+
+    private TranslateUiState runningState(ButtonState buttons, @Nullable TranslationProgress p) {
+        TranslateUiState.Builder b = TranslateUiState.of(TranslateUiState.Mode.RUNNING, buttons).bar(true);
+        addWatchablePanel(b, "Watchable up to", watchableSubline());
+        b.panel("Progress", ChunkTimelineTracker.percentDone(lastModel) + "%", progressSubline(p), false);
+        addCostPanel(b, "Spent so far", p, true);
+        addLegend(b);
+        addPills(b, p);
+        return b.build();
+    }
+
+    private TranslateUiState pausedState(ButtonState buttons, @Nullable TranslationProgress p) {
+        // Both sublines say the same thing in two registers: the run is frozen, not thrown away.
+        // That is the entire difference between Pause and Cancel, and it belongs where the eye
+        // already is rather than in a sentence somewhere else on the screen.
+        TranslateUiState.Builder b = TranslateUiState.of(TranslateUiState.Mode.PAUSED, buttons)
+                .bar(true)
+                .panel("Paused at", formatDuration(watchableUntilMs()), "nothing is lost", true)
+                .panel("Spent so far", costFigure(p), "resume to continue", false);
+        addLegend(b);
+        return b.build();
+    }
+
+    private TranslateUiState finishedState(ButtonState buttons, @Nullable TranslationProgress p) {
+        int reused = session.reusedEntries();
+        boolean partial = buttons == ButtonState.FINISHED_WARNING;
+        TranslateUiState.Builder b;
+        switch (buttons) {
+            case FINISHED_ERROR:
+                String msg = (p != null && p.getErrorMessage() != null) ? p.getErrorMessage() : "unknown error";
+                // No panels: nothing was produced, so there is nothing to put a number on.
+                return TranslateUiState.of(TranslateUiState.Mode.FINISHED, buttons)
+                        .result(TranslateUiState.Tone.ERROR, "Translation failed", msg)
+                        .build();
+            case FINISHED_CANCELLED:
+                return TranslateUiState.of(TranslateUiState.Mode.FINISHED, buttons)
+                        .result(TranslateUiState.Tone.MUTED, "Cancelled", "Nothing was kept")
+                        .build();
+            case FINISHED_WARNING:
+                int kept = p != null ? p.getUntranslatedEntries() : 0;
+                b = TranslateUiState.of(TranslateUiState.Mode.FINISHED, buttons)
+                        .result(TranslateUiState.Tone.WARN, "Partially translated",
+                                kept > 0 ? kept + " lines kept in the original language" : null)
+                        .retryMissing(true);
+                break;
+            case FINISHED_OK:
+            default:
+                boolean freeRun = p == null || p.getStats() == null || p.getStats().getCostUsd() == null
+                        || p.getStats().getCostUsd() <= 0;
+                b = TranslateUiState.of(TranslateUiState.Mode.FINISHED, buttons)
+                        .result(TranslateUiState.Tone.OK,
+                                freeRun && reused > 0 ? "Done, nothing to pay for" : "Done",
+                                reused > 0 ? reused + " lines reused from cache" : null);
+                break;
+        }
+        b.bar(true);
+        addWatchablePanel(b, "Watchable up to", chunkCountSubline(p));
+        addCostPanel(b, "Cost", p, false);
+        addLegend(b);
+        return b.build();
+    }
+
+    // --- the pieces each state is assembled from ---
+
+    private void addWatchablePanel(TranslateUiState.Builder b, String label, @Nullable String sub) {
+        b.panel(label, formatDuration(watchableUntilMs()), sub, true);
+    }
+
+    /**
+     * How far the user can keep watching without running into untranslated lines, measured
+     * <em>from where they are</em> rather than from the start of the file — a gap they have already
+     * driven past is no longer their problem.
+     */
+    private long watchableUntilMs() {
+        return session.watchableUntilMs(lastPositionMs);
+    }
+
+    /** How much of that is still ahead of the playhead. Hits zero exactly when playback catches up. */
+    @Nullable
+    private String watchableSubline() {
+        long left = watchableUntilMs() - lastPositionMs;
+        if (left <= 0) return "playback has caught up";
+        return formatDuration(left) + " left from here";
+    }
+
+    @Nullable
+    private String progressSubline(@Nullable TranslationProgress p) {
+        if (p == null) return null;
+        StringBuilder sb = new StringBuilder();
+        if (p.getTotalChunks() > 0) {
+            sb.append(p.getCompletedChunks()).append(" of ")
+                    .append(p.isStreaming() ? "~" : "").append(p.getTotalChunks()).append(" chunks");
+        }
+        // Not a ternary: mixing a primitive long with a nullable Long makes javac unbox the null
+        // branch, so "no ETA yet" crashed instead of simply not being shown.
+        Long eta;
+        if (p.isStreaming() && p.getEtaMs() >= 0) {
+            eta = p.getEtaMs();
+        } else {
+            eta = timeline.estimatedRemainingMs(p);
+        }
+        // Absent until the first chunk closes: before that there is no average to extrapolate from,
+        // and the screen has to be able to live without it.
+        if (eta != null && eta >= 0) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append("ETA ").append(formatDuration(eta));
+        }
+        return sb.length() > 0 ? sb.toString() : null;
+    }
+
+    @Nullable
+    private String chunkCountSubline(@Nullable TranslationProgress p) {
+        if (p == null || p.getTotalChunks() <= 0) return null;
+        return p.getCompletedChunks() + " of " + p.getTotalChunks() + " chunks";
+    }
+
+    private void addCostPanel(TranslateUiState.Builder b, String label, @Nullable TranslationProgress p,
+                              boolean project) {
+        b.panel(label, costFigure(p), project ? projectionSubline(p) : tokensSubline(p), false);
+    }
+
+    private static String costFigure(@Nullable TranslationProgress p) {
+        Double cost = (p != null && p.getStats() != null) ? p.getStats().getCostUsd() : null;
+        return cost != null ? formatCost(cost) : "—";
+    }
+
+    /**
+     * What it is going to cost, not just what it has cost. Mid-run that is the number that decides
+     * whether to let it finish. {@code null} when there is nothing honest to extrapolate from — see
+     * {@link CostProjection} — and then the panel simply shows the figure on its own.
+     */
+    @Nullable
+    private String projectionSubline(@Nullable TranslationProgress p) {
+        if (p == null || p.getStats() == null) return null;
+        Double projected = CostProjection.projectUsd(p.getStats().getCostUsd(),
+                p.getCompletedChunks(), p.isStreaming() ? 0 : p.getTotalChunks());
+        if (projected == null) return tokensSubline(p);
+        return "≈ " + formatCost(projected) + " when done";
+    }
+
+    @Nullable
+    private String tokensSubline(@Nullable TranslationProgress p) {
+        if (p == null || p.getStats() == null) return null;
+        TranslationStats st = p.getStats();
+        StringBuilder sb = new StringBuilder(String.format(Locale.US, "%,d tokens", st.getTotalTokens()));
+        if (st.getElapsedMs() > 0) sb.append(" · ").append(st.getElapsedMs() / 1000).append("s");
+        return sb.toString();
+    }
+
+    /**
+     * A key to the colours that are <em>actually on the bar right now</em> — never a running
+     * commentary. With nothing extracting there is no EXTRACTING entry, and with everything green
+     * there is no legend at all.
+     */
+    private void addLegend(TranslateUiState.Builder b) {
+        boolean extracting = false, translating = false, failed = false, background = false;
+        for (ChunkProgressBarView.Segment seg : lastModel.segments) {
+            switch (seg.state) {
+                case EXTRACTING:
+                case CLOSING: extracting = true; break;
+                case TRANSLATING: translating = true; break;
+                case FAILED: failed = true; break;
+                default: break;
+            }
+            if (seg.backgroundPass) background = true;
+        }
+        if (extracting) b.legend(SubsTheme.STATUS_EXTRACTING, "EXTRACTING", false);
+        if (translating) b.legend(SubsTheme.STATUS_TRANSLATING, "TRANSLATING", false);
+        if (failed) b.legend(SubsTheme.STATUS_FAILED, "FAILED", false);
+        if (background) b.legend(SubsTheme.STATUS_PENDING, "BACKFILLING", true);
+    }
+
+    /** One pill per chunk in flight, replaced as they close — never a growing history. */
+    private void addPills(TranslateUiState.Builder b, @Nullable TranslationProgress p) {
+        if (p == null) return;
+        List<ChunkProgress> active = p.getActiveChunks();
+        if (active == null) return;
+        for (ChunkProgress c : active) {
+            // One-based: the engine counts chunks from 0 for its logs, and "Chunk 0" on screen
+            // reads as a bug rather than as the first one.
+            b.pill(SubsTheme.STATUS_TRANSLATING, "Chunk " + (c.getIndex() + 1),
+                    c.getRetries() > 0 ? "retry " + c.getRetries() : null);
+        }
+    }
+
+    /** The target language as the user would name it, for the idle screen's headline. */
+    private String targetLanguageName() {
+        String code = targetLanguage();
+        String name = new Locale(code.split("-")[0]).getDisplayLanguage(Locale.getDefault());
+        return (name == null || name.isEmpty()) ? code : name;
+    }
+
+    @Nullable
+    private String idleSubline() {
+        // Only what is actually known: an embedded track that has not been read yet has no line count
+        // to report, and inventing one would be worse than saying nothing.
+        if (source == null) return null;
+        return String.format(Locale.US, "%,d lines", source.getEntries().size());
     }
 
     private static ButtonState buttonStateFor(boolean available, RunStatus status,
@@ -517,50 +750,6 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
             case IDLE:
             default:
                 return available ? ButtonState.IDLE : ButtonState.UNAVAILABLE;
-        }
-    }
-
-    private String formatStatus(RunStatus status, @Nullable TranslationProgress p) {
-        switch (status) {
-            case RUNNING:
-                if (p == null) return "Translating…";
-                if (p.isStreaming()) {
-                    StringBuilder streaming = new StringBuilder(streamingSummary(p));
-                    streaming.append(formatCostSoFar(p));
-                    appendActiveChunks(streaming, p);
-                    return streaming.toString();
-                }
-                StringBuilder running = new StringBuilder("Translating… ")
-                        .append(p.getCompletedChunks()).append("/").append(p.getTotalChunks());
-                int inProgress = Math.max(0, p.getStartedChunks() - p.getCompletedChunks());
-                if (inProgress > 0) running.append(" · ").append(inProgress).append(" in progress");
-                if (p.getFailedChunks() > 0) running.append(" · ").append(p.getFailedChunks()).append(" failed");
-                if (p.isLastChunkFailed()) running.append(" · ⚠ last chunk failed to translate");
-                if (p.getReadyUntilMs() > 0) running.append(" · ready up to ").append(formatDuration(p.getReadyUntilMs()));
-                running.append(formatCostSoFar(p));
-                appendActiveChunks(running, p);
-                return running.toString();
-            case PAUSED:
-                // Says what survives the pause, because that is the whole difference from Cancel.
-                StringBuilder paused = new StringBuilder("Paused");
-                if (p != null) {
-                    if (p.getReadyUntilMs() > 0) {
-                        paused.append(" · ").append(formatDuration(p.getReadyUntilMs())).append(" translated");
-                    }
-                    paused.append(formatCostSoFar(p));
-                }
-                paused.append(" · kept — Resume to continue");
-                return paused.toString();
-            case DONE:
-                return formatDone(p);
-            case CANCELLED:
-                return "Cancelled";
-            case ERROR:
-                String msg = (p != null && p.getErrorMessage() != null) ? p.getErrorMessage() : "unknown error";
-                return "Translation failed: " + msg;
-            case IDLE:
-            default:
-                return "";
         }
     }
 
@@ -603,25 +792,6 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     }
 
     /**
-     * One line per chunk currently in flight, with the retries it has already cost. Panel only: the
-     * overlay indicator sits over the video and has to stay a single line.
-     *
-     * <p>Lines are replaced as chunks finish and new ones start, so the block always shows what is
-     * being worked on right now rather than a growing history.
-     */
-    private static void appendActiveChunks(StringBuilder sb, TranslationProgress p) {
-        List<ChunkProgress> active = p.getActiveChunks();
-        if (active == null || active.isEmpty()) return;
-        for (ChunkProgress c : active) {
-            sb.append("\n   chunk ").append(c.getIndex())
-                    .append(" · lines ").append(c.getFirstEntry()).append("-").append(c.getLastEntry());
-            if (c.getRetries() > 0) {
-                sb.append(" · retry ").append(c.getRetries());
-            }
-        }
-    }
-
-    /**
      * Cost accrued by the chunks that have finished, as " · $0.0123", or empty until the provider
      * has reported one. Shown live because a long run otherwise gives no hint of what it is spending
      * until it ends — and by then the money is gone.
@@ -639,31 +809,6 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         return costUsd < 0.10
                 ? String.format(Locale.US, "%.2f¢", costUsd * 100)
                 : String.format(Locale.US, "$%.2f", costUsd);
-    }
-
-    private String formatDone(@Nullable TranslationProgress p) {
-        int reused = session.reusedEntries();
-        if (p == null || p.getStats() == null) {
-            return reused > 0 ? "Done — " + reused + " lines from cache, nothing to pay for" : "Done";
-        }
-        boolean partial = p.getFailedChunks() > 0 || p.getUntranslatedEntries() > 0;
-        TranslationStats stats = p.getStats();
-        StringBuilder sb = new StringBuilder(partial ? "Partially translated — " : "Done — ")
-                .append(stats.getElapsedMs() / 1000).append("s · ")
-                .append(String.format(Locale.US, "%,d", stats.getTotalTokens())).append(" tokens");
-        if (stats.getCostUsd() != null) {
-            sb.append(" · ").append(formatCost(stats.getCostUsd()));
-        }
-        if (reused > 0) {
-            // The cost above is what this run actually spent; saying how much came free is the only
-            // way the number makes sense next to a subtitle that is fully translated.
-            sb.append(" · ").append(reused).append(" lines reused from cache (not charged)");
-        }
-        if (p.getUntranslatedEntries() > 0) {
-            sb.append(" — ").append(p.getUntranslatedEntries()).append(" lines kept in the original language");
-            if (p.getReadyUntilMs() > 0) sb.append(" (ready up to ").append(formatDuration(p.getReadyUntilMs())).append(")");
-        }
-        return sb.toString();
     }
 
     /**

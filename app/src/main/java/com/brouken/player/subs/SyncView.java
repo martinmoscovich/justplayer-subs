@@ -2,7 +2,6 @@ package com.brouken.player.subs;
 
 import android.content.Context;
 import android.graphics.Color;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -16,9 +15,19 @@ import androidx.annotation.Nullable;
 import androidx.leanback.widget.VerticalGridView;
 import androidx.recyclerview.widget.RecyclerView;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+
+import com.brouken.player.R;
+import com.brouken.player.subs.ui.SubsButton;
+import com.brouken.player.subs.ui.SubsCenteredBlock;
+import com.brouken.player.subs.ui.SubsModal;
+import com.brouken.player.subs.ui.SubsShapes;
+import com.brouken.player.subs.ui.SubsText;
+import com.brouken.player.subs.ui.SubsTheme;
 
 import subtitleengine.core.model.SubtitleEntry;
 import subtitleengine.sync.ManualSyncSession;
@@ -29,6 +38,16 @@ import subtitleengine.sync.SyncTransform;
  * The manual-sync UI: a "lyrics" list of dialogue lines with a transport/control row. All sync
  * computation lives in the engine's {@link ManualSyncSession}; this view only renders it and turns
  * key presses into session calls / player operations (via {@link Listener}).
+ *
+ * <p>Three things share the screen and must never be confused with each other: the line that is
+ * <b>playing</b> (cyan), the line the user has <b>pointed at</b> (white card), and the <b>focus</b>
+ * itself, which is in the button row until "Sync line" moves it into the list. That is the same
+ * white-is-focus / cyan-is-chosen rule the whole panel follows.
+ *
+ * <p>Whenever something is running or impossible, the dialogue list stops being useful and gives way
+ * to a {@link SubsCenteredBlock}; the two modal moments (choosing where auto-sync starts, reviewing
+ * what it found) go through {@link SubsModal}. Both replace text that used to be crammed into the
+ * hint line.
  */
 public class SyncView extends FrameLayout {
 
@@ -48,23 +67,30 @@ public class SyncView extends FrameLayout {
         void onCancelAutoSync();
     }
 
-    private static final int COLOR_DIM = 0x80FFFFFF;
-    private static final int COLOR_ACTIVE = 0xFF4DD0E1;
-    private static final int COLOR_FOCUS_TEXT = 0xFFFFFFFF;
-    private static final int COLOR_DISABLED = 0x40FFFFFF;
-    private static final int FOCUS_BG = 0x33FFFFFF;
-    private static final int SEGMENT_LABEL = 0xB0B0BEC5;
+    // Dialogue inks. The two non-active ones are alpha-modulated on-surface: a dialogue you are not
+    // at is still readable, just clearly not the one being talked about.
+    private static final int CUE_FAR = 0x6BDDE4E5;
+    private static final int CUE_NEAR = 0x9EDDE4E5;
+    private static final int TIME_FAR = 0xBF647C86;
+    private static final int TIME_ACTIVE = 0xB38AEBFF;
+    private static final int TIME_SELECTED = 0x8C283044;
 
     private static final int AUTO_SYNC_INDEX = 1;
     private static final int PREV_SEG_INDEX = 2;
-    private static final int SEEK_BACK_INDEX = 3;
     private static final int PLAY_PAUSE_INDEX = 4;
-    private static final int SEEK_FWD_INDEX = 5;
     private static final int NEXT_SEG_INDEX = 6;
 
     private enum Zone { CONTROLS, LIST, REVIEW, AUTO_SYNC_MENU }
 
-    private static final String[] AUTO_SYNC_MENU_OPTIONS = { "From Start", "From Here" };
+    /**
+     * Which row of buttons is on screen. The full transport only makes sense when there is something
+     * to transport through: while a read or an auto-sync runs, the row collapses to the two things
+     * that still apply — and one of them is always a way to stop it.
+     */
+    private enum RowShape { FULL, RUNNING, DEAD }
+
+    private static final String EMPTY_TITLE = "Nothing to sync yet";
+    private static final String EMPTY_SUB = "Press Auto-sync to read this track from the video";
 
     private static final class Btn {
         final String label;
@@ -74,35 +100,49 @@ public class SyncView extends FrameLayout {
 
     private final TextView readout;
     private final TextView hint;
-    /** Shown when there is nothing to sync. Embedded tracks reach this screen with no cues until
-     *  their container has been read, and pressing Auto-sync is what starts that read. */
-    private static final String EMPTY_MESSAGE = "Nothing to sync yet\nPress Auto-sync to read this track from the video";
-
-    private final TextView emptyMessage;
-    @Nullable private String busyStatus;
+    private final SubsCenteredBlock centeredBlock;
+    private final SubsModal modal;
     private final VerticalGridView list;
     private final LinearLayout buttonRow;
     private final CueAdapter adapter = new CueAdapter();
+
     private final Btn[] buttons;
-    private final TextView[] buttonViews;
+    private final SubsButton[] buttonViews;
     private final boolean[] enabled;
+    private final SubsButton runCancelButton;
+    private final SubsButton runDoneButton;
+    private final SubsButton deadDoneButton;
+    private RowShape rowShape = RowShape.FULL;
+    private int runIndex; // focus within the RUNNING row: 0 = Cancel, 1 = Done
+
+    /** Modal buttons, rebuilt per showing so their focus state starts clean. */
+    private final List<SubsButton> modalButtons = new ArrayList<>();
+    private int modalIndex;
 
     private Listener listener;
     private ManualSyncSession session; // engine — the source of truth for cues + sync logic
     @Nullable private AutoSyncUiState autoSyncState;
+    @Nullable private String busyTitle;
+    private float busyFraction = -1f;
     private boolean autoscroll = true;
     private Zone zone = Zone.CONTROLS;
     private int buttonIndex = 0;
-    private int autoSyncMenuIndex = 0; // 0 = "From Start", 1 = "From Here"
     private boolean lastPlaying = true;
     private boolean hasFocus = true;
 
     public SyncView(Context context) {
         super(context);
 
-        readout = label(15, Color.WHITE);
-        readout.setPadding(dp(24), dp(2), dp(24), dp(8));
-        addView(readout, lp(Gravity.TOP | Gravity.START, 0, 0));
+        LinearLayout column = new LinearLayout(context);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setGravity(Gravity.CENTER_HORIZONTAL);
+        column.setPadding(dp(24), dp(56), dp(24), dp(14));
+        addView(column, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        FrameLayout stage = new FrameLayout(context);
+        column.addView(stage, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         list = new VerticalGridView(context);
         list.setWindowAlignment(VerticalGridView.WINDOW_ALIGN_NO_EDGE);
@@ -110,56 +150,80 @@ public class SyncView extends FrameLayout {
         list.setItemAlignmentOffsetPercent(50f);
         list.setFocusable(false);
         list.setAdapter(adapter);
-        FrameLayout.LayoutParams llp = new FrameLayout.LayoutParams(
+        stage.addView(list, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        centeredBlock = new SubsCenteredBlock(context);
+        centeredBlock.setVisibility(GONE);
+        FrameLayout.LayoutParams cbp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        llp.topMargin = dp(28);
-        llp.bottomMargin = dp(104);
-        addView(list, llp);
+        stage.addView(centeredBlock, cbp);
 
-        emptyMessage = label(17, 0xFFB0BEC5);
-        emptyMessage.setGravity(Gravity.CENTER);
-        emptyMessage.setPadding(dp(40), 0, dp(40), 0);
-        emptyMessage.setText(EMPTY_MESSAGE);
-        emptyMessage.setVisibility(GONE);
-        FrameLayout.LayoutParams emp = new FrameLayout.LayoutParams(
+        hint = SubsTheme.labelSm(new TextView(context));
+        hint.setGravity(Gravity.CENTER);
+        hint.setTextColor(SubsTheme.INK_3);
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        emp.gravity = Gravity.CENTER;
-        addView(emptyMessage, emp);
-
-        hint = label(13, 0xFF90A4AE);
-        hint.setPadding(dp(24), dp(6), dp(24), dp(4));
-        addView(hint, lp(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, dp(56)));
+        hlp.bottomMargin = dp(10);
+        column.addView(hint, hlp);
 
         buttons = new Btn[]{
                 new Btn("Sync line", this::enterListMode),
                 new Btn("Auto-sync", this::toggleAutoSync),
-                new Btn("|« Prev seg", this::seekPrevSegment),
-                new Btn("« 5s", () -> seek(-1)),
-                new Btn("⏸", this::togglePlay),
-                new Btn("5s »", () -> seek(1)),
-                new Btn("Next seg »|", this::seekNextSegment),
+                new Btn("Prev seg", this::seekPrevSegment),
+                new Btn("5s", () -> seek(-1)),
+                new Btn("", this::togglePlay),
+                new Btn("5s", () -> seek(1)),
+                new Btn("Next seg", this::seekNextSegment),
                 new Btn("Done", this::requestClose),
         };
         enabled = new boolean[buttons.length];
-        for (int i = 0; i < enabled.length; i++) enabled[i] = true;
+        Arrays.fill(enabled, true);
+
+        buttonViews = new SubsButton[]{
+                new SubsButton(context, "Sync line", R.drawable.subtitle_ic_anchor),
+                new SubsButton(context, "Auto-sync", R.drawable.subtitle_ic_sparkles),
+                SubsButton.round(context, R.drawable.subtitle_ic_prev_seg),
+                new SubsButton(context, "5s", R.drawable.subtitle_ic_rewind),
+                SubsButton.round(context, R.drawable.subtitle_ic_pause),
+                SubsButton.trailing(context, "5s", R.drawable.subtitle_ic_forward),
+                SubsButton.round(context, R.drawable.subtitle_ic_next_seg),
+                new SubsButton(context, "Done"),
+        };
+
+        runCancelButton = new SubsButton(context, "Cancel");
+        runDoneButton = new SubsButton(context, "Done");
+        deadDoneButton = new SubsButton(context, "Done");
 
         buttonRow = new LinearLayout(context);
         buttonRow.setOrientation(LinearLayout.HORIZONTAL);
         buttonRow.setGravity(Gravity.CENTER);
-        buttonRow.setPadding(dp(12), dp(8), dp(12), dp(12));
-        buttonViews = new TextView[buttons.length];
-        for (int i = 0; i < buttons.length; i++) {
-            TextView b = label(14, COLOR_FOCUS_TEXT);
-            b.setText(buttons[i].label);
-            b.setPadding(dp(14), dp(8), dp(14), dp(8));
-            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            blp.leftMargin = dp(4);
-            blp.rightMargin = dp(4);
-            buttonRow.addView(b, blp);
-            buttonViews[i] = b;
-        }
-        addView(buttonRow, lp(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, 0));
+        column.addView(buttonRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        buildRow(RowShape.FULL);
+
+        // The offset/nudge/anchor readout: a capsule pinned to the content area's top-left corner,
+        // out of the way of everything, because it is a reference and never a target.
+        readout = SubsTheme.labelSm(new TextView(context));
+        readout.setTextColor(SubsTheme.INK_2);
+        readout.setGravity(Gravity.CENTER_VERTICAL);
+        readout.setSingleLine(true);
+        readout.setBackground(SubsShapes.panel(context, SubsTheme.RADIUS_ROW_DP));
+        readout.setPadding(dp(12), 0, dp(12), 0);
+        readout.setHeight(dp(28));
+        FrameLayout.LayoutParams rlp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(28));
+        rlp.gravity = Gravity.TOP | Gravity.START;
+        rlp.leftMargin = dp(24);
+        rlp.topMargin = dp(16);
+        addView(readout, rlp);
+
+        modal = new SubsModal(context);
+        addView(modal, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        updateReadout();
+        updateHint();
     }
 
     public void setListener(Listener l) {
@@ -170,46 +234,48 @@ public class SyncView extends FrameLayout {
     public void setSession(ManualSyncSession session) {
         this.session = session;
         long seekS = session != null ? session.settings().getSeekMs() / 1000 : 5;
-        buttonViews[SEEK_BACK_INDEX].setText("« " + seekS + "s");
-        buttonViews[SEEK_FWD_INDEX].setText(seekS + "s »");
+        buttonViews[3].setText(seekS + "s");
+        buttonViews[5].setText(seekS + "s");
         adapter.notifyDataSetChanged();
-        boolean empty = cues().isEmpty();
-        emptyMessage.setVisibility(empty ? VISIBLE : GONE);
-        list.setVisibility(empty ? GONE : VISIBLE);
         updateReadout();
         updateButtons();
+        updateStage();
     }
 
     /**
      * A blocking step this screen is waiting on — reading an embedded track's cues out of the
-     * container. It replaces the empty-state message, which is exactly the state the screen is in
-     * while it runs; {@code null} restores it.
+     * container. It takes over the screen, which is exactly the state the screen is in while it
+     * runs; {@code null} gives it back. {@code fraction} is negative when unknown.
      */
-    public void setBusyStatus(@Nullable String busy) {
-        this.busyStatus = busy;
-        emptyMessage.setText(busy != null ? busy : EMPTY_MESSAGE);
-        // The blocking step (reading an embedded track) has no Status of its own to drive the
-        // button — without this, Auto-sync still reads "Auto-sync" (and presses as "start a new
-        // one") while one is already running underneath it, with no way to cancel it.
-        buttonViews[AUTO_SYNC_INDEX].setText(
-                busy != null || (autoSyncState != null && autoSyncState.running) ? "Cancel" : "Auto-sync");
+    public void setBusyStatus(@Nullable String title, float fraction) {
+        this.busyTitle = title;
+        this.busyFraction = fraction;
+        updateButtons();
+        updateStage();
     }
 
     /** Pushes formatted auto-sync state (see {@link AutoSyncController}). A confident result opens Zone.REVIEW. */
     public void setAutoSyncState(AutoSyncUiState state) {
         this.autoSyncState = state;
-        buttonViews[AUTO_SYNC_INDEX].setText(state.running ? "Cancel" : "Auto-sync");
-        if (state.hasConfidentResult) {
+        if (state.hasConfidentResult && zone != Zone.REVIEW) {
             zone = Zone.REVIEW;
             adapter.setSelectedIndex(-1);
+            showReviewModal();
         }
         updateButtons();
         updateHint();
         updateReadout();
+        updateStage();
     }
 
     public void setFocused(boolean f) {
         hasFocus = f;
+        if (f && zone == Zone.CONTROLS) {
+            // Arriving on the screen starts at "Sync line". Without this the cursor keeps wherever
+            // it was pushed while the session was still null and every control was disabled — which
+            // is how entering Sync used to land on "Next seg".
+            buttonIndex = enabled[0] ? 0 : nextEnabled(0, 1);
+        }
         updateButtons();
     }
 
@@ -217,10 +283,13 @@ public class SyncView extends FrameLayout {
         autoscroll = true;
         zone = Zone.CONTROLS;
         buttonIndex = 0;
+        runIndex = 0;
+        modal.hide();
         adapter.setSelectedIndex(-1);
         updateReadout();
         updateButtons();
         updateHint();
+        updateStage();
         int idx = session != null ? session.scrollTargetIndex(pos()) : -1;
         if (idx >= 0 && idx < cues().size()) list.setSelectedPosition(idx);
     }
@@ -237,7 +306,8 @@ public class SyncView extends FrameLayout {
         boolean playing = listener != null && listener.isPlaying();
         if (playing != lastPlaying) {
             lastPlaying = playing;
-            buttonViews[PLAY_PAUSE_INDEX].setText(playing ? "⏸" : "▶");
+            buttonViews[PLAY_PAUSE_INDEX].setIcon(
+                    playing ? R.drawable.subtitle_ic_pause : R.drawable.subtitle_ic_play);
         }
         updateButtons();
     }
@@ -245,8 +315,8 @@ public class SyncView extends FrameLayout {
     public boolean handleKey(int keyCode) {
         switch (zone) {
             case LIST: return handleListKey(keyCode);
-            case REVIEW: return handleReviewKey(keyCode);
-            case AUTO_SYNC_MENU: return handleAutoSyncMenuKey(keyCode);
+            case REVIEW: return handleModalKey(keyCode, true);
+            case AUTO_SYNC_MENU: return handleModalKey(keyCode, false);
             default: return handleControlsKey(keyCode);
         }
     }
@@ -254,6 +324,7 @@ public class SyncView extends FrameLayout {
     // --- CONTROLS zone ---
 
     private boolean handleControlsKey(int keyCode) {
+        if (rowShape != RowShape.FULL) return handleReducedRowKey(keyCode);
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_LEFT:
                 int left = nextEnabled(buttonIndex, -1);
@@ -275,6 +346,44 @@ public class SyncView extends FrameLayout {
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
                 if (enabled[buttonIndex]) buttons[buttonIndex].action.run();
+                return true;
+            case KeyEvent.KEYCODE_BACK:
+                if (listener != null) listener.onOpenMenu();
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** RUNNING ([Cancel, Done]) and DEAD ([Done]) rows: a two-stop walk, nothing to disable. */
+    private boolean handleReducedRowKey(int keyCode) {
+        int count = rowShape == RowShape.RUNNING ? 2 : 1;
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                if (runIndex == 0) {
+                    if (listener != null) listener.onOpenMenu();
+                } else {
+                    runIndex--;
+                    updateButtons();
+                }
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                if (runIndex < count - 1) {
+                    runIndex++;
+                    updateButtons();
+                }
+                return true;
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                if (rowShape == RowShape.RUNNING && runIndex == 0) {
+                    if (listener != null) listener.onCancelAutoSync();
+                } else {
+                    requestClose();
+                }
                 return true;
             case KeyEvent.KEYCODE_BACK:
                 if (listener != null) listener.onOpenMenu();
@@ -395,20 +504,68 @@ public class SyncView extends FrameLayout {
         if (t != ManualSyncSession.NO_TARGET) listener.onSeekTo(t);
     }
 
-    // --- REVIEW zone (auto-sync proposal: accept/reject, never applied silently) ---
+    // --- the two modal moments ---
 
-    private boolean handleReviewKey(int keyCode) {
+    /** The auto-sync proposal. It <em>proposes</em>: nothing is applied until Accept. */
+    private void showReviewModal() {
+        double offset = autoSyncState != null ? autoSyncState.offsetSeconds : 0;
+        showModal("Auto-sync found a match",
+                String.format(Locale.US, "Shift subtitles %+.2fs", offset),
+                new SubsButton(getContext(), "Accept"),
+                new SubsButton(getContext(), "Reject"));
+    }
+
+    private void showAutoSyncMenu() {
+        showModal("Start auto-sync from", null,
+                new SubsButton(getContext(), "From Start", R.drawable.subtitle_ic_play),
+                new SubsButton(getContext(), "From Here", R.drawable.subtitle_ic_location));
+    }
+
+    private void showModal(String title, @Nullable String big, SubsButton... buttons) {
+        modalButtons.clear();
+        Collections.addAll(modalButtons, buttons);
+        modalIndex = 0;
+        modal.show(title, big, modalButtons);
+        styleModalButtons();
+    }
+
+    private void styleModalButtons() {
+        for (int i = 0; i < modalButtons.size(); i++) {
+            modalButtons.get(i).setFocusedState(i == modalIndex);
+        }
+    }
+
+    /**
+     * Both modals share this: two buttons, ◄ ► to choose, OK to take it, Back to decline. The
+     * {@code confirmIsFirst} flag only decides what Back means — rejecting a proposal is a real
+     * decision, dismissing a menu is not.
+     */
+    private boolean handleModalKey(int keyCode, boolean review) {
         switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_UP:
+                if (modalIndex > 0) { modalIndex--; styleModalButtons(); }
+                return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                if (modalIndex < modalButtons.size() - 1) { modalIndex++; styleModalButtons(); }
+                return true;
             case KeyEvent.KEYCODE_DPAD_CENTER:
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                acceptAutoSync();
+                if (review) {
+                    if (modalIndex == 0) acceptAutoSync(); else rejectAutoSync();
+                } else {
+                    boolean fromHere = modalIndex == 1;
+                    exitModal();
+                    if (listener != null) listener.onStartAutoSync(fromHere);
+                }
                 return true;
             case KeyEvent.KEYCODE_BACK:
-                rejectAutoSync();
+                if (review) rejectAutoSync(); else exitModal();
                 return true;
             default:
-                return true; // modal: swallow navigation until accept/reject
+                return true; // modal: swallow navigation until there is a decision
         }
     }
 
@@ -417,69 +574,132 @@ public class SyncView extends FrameLayout {
             session.applyVadOffset(autoSyncState.offsetSeconds);
             if (listener != null) listener.onSyncChanged();
         }
-        exitReviewMode();
+        exitModal();
     }
 
     private void rejectAutoSync() {
-        exitReviewMode(); // discards the proposal — SyncState is untouched
+        exitModal(); // discards the proposal — SyncState is untouched
     }
 
-    private void exitReviewMode() {
+    private void exitModal() {
+        modal.hide();
+        modalButtons.clear();
         zone = Zone.CONTROLS;
         updateButtons();
         updateHint();
         updateReadout();
+        updateStage();
     }
 
     private void toggleAutoSync() {
         if (listener == null) return;
-        if (busyStatus != null || (autoSyncState != null && autoSyncState.running)) {
+        if (busyTitle != null || (autoSyncState != null && autoSyncState.running)) {
             listener.onCancelAutoSync();
         } else {
-            autoSyncMenuIndex = 0;
             zone = Zone.AUTO_SYNC_MENU;
+            showAutoSyncMenu();
             updateButtons();
             updateHint();
         }
     }
 
-    // --- AUTO_SYNC_MENU zone: "From Start" / "From Here" choice, modal like REVIEW ---
+    // --- rendering ---
 
-    private boolean handleAutoSyncMenuKey(int keyCode) {
-        switch (keyCode) {
-            case KeyEvent.KEYCODE_DPAD_UP:
-            case KeyEvent.KEYCODE_DPAD_DOWN:
-            case KeyEvent.KEYCODE_DPAD_LEFT:
-            case KeyEvent.KEYCODE_DPAD_RIGHT:
-                autoSyncMenuIndex = 1 - autoSyncMenuIndex;
-                updateHint();
-                return true;
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                exitAutoSyncMenu();
-                if (listener != null) listener.onStartAutoSync(autoSyncMenuIndex == 1);
-                return true;
-            case KeyEvent.KEYCODE_BACK:
-                exitAutoSyncMenu();
-                return true;
+    private boolean running() {
+        return busyTitle != null || (autoSyncState != null && autoSyncState.running);
+    }
+
+    /** True only when the screen has literally nothing to offer: no cues <em>and</em> no way to get any. */
+    private boolean deadEnd() {
+        return !hasCues() && autoSyncState != null && !autoSyncState.available;
+    }
+
+    private boolean hasCues() {
+        return session != null && session.hasCues();
+    }
+
+    /**
+     * Decides between the three things that can occupy the middle of the screen — the dialogue list,
+     * a running step, or an explanation of why there is nothing to do — and keeps the button row in
+     * step with it.
+     */
+    private void updateStage() {
+        RowShape shape;
+        if (running()) {
+            String title = busyTitle != null ? busyTitle
+                    : (autoSyncState != null && autoSyncState.runTitle != null ? autoSyncState.runTitle : "Working");
+            float fraction = busyTitle != null ? busyFraction
+                    : (autoSyncState != null ? autoSyncState.runFraction : -1f);
+            String pct = fraction >= 0f ? Math.round(fraction * 100) + "%" : null;
+            centeredBlock.show(R.drawable.subtitle_ic_spinner, true, title, pct, fraction);
+            list.setVisibility(GONE);
+            shape = RowShape.RUNNING;
+        } else if (deadEnd()) {
+            centeredBlock.show(R.drawable.subtitle_ic_unavailable, false, "Auto-sync unavailable",
+                    autoSyncState.unavailableReason, -1f);
+            list.setVisibility(GONE);
+            shape = RowShape.DEAD;
+        } else if (!hasCues()) {
+            // Still the full row: the message says "press Auto-sync", so Auto-sync has to be there.
+            centeredBlock.show(R.drawable.subtitle_ic_subtitles, false, EMPTY_TITLE, EMPTY_SUB, -1f);
+            list.setVisibility(GONE);
+            shape = RowShape.FULL;
+        } else {
+            centeredBlock.hide();
+            list.setVisibility(VISIBLE);
+            shape = RowShape.FULL;
+        }
+        if (shape != rowShape) {
+            runIndex = 0;
+            buildRow(shape);
+            updateHint();
+        }
+        updateButtons();
+    }
+
+    private void buildRow(RowShape shape) {
+        rowShape = shape;
+        buttonRow.removeAllViews();
+        Context c = getContext();
+        switch (shape) {
+            case RUNNING:
+                buttonRow.addView(runCancelButton, runCancelButton.rowParams());
+                buttonRow.addView(runDoneButton, runDoneButton.rowParams());
+                break;
+            case DEAD:
+                buttonRow.addView(deadDoneButton, deadDoneButton.rowParams());
+                break;
+            case FULL:
             default:
-                return true; // modal: swallow navigation until a choice or Back
+                for (int i = 0; i < buttonViews.length; i++) {
+                    // The transport group is fenced off from the two sync actions on its left and
+                    // from Done on its right: three groups, three jobs.
+                    if (i == PREV_SEG_INDEX || i == buttonViews.length - 1) {
+                        buttonRow.addView(SubsButton.separator(c));
+                    }
+                    buttonRow.addView(buttonViews[i], buttonViews[i].rowParams());
+                }
+                break;
         }
     }
 
-    private void exitAutoSyncMenu() {
-        zone = Zone.CONTROLS;
-        updateButtons();
-        updateHint();
-    }
-
-    // --- rendering ---
-
     private void updateButtons() {
+        if (rowShape != RowShape.FULL) {
+            boolean dim = !hasFocus;
+            if (rowShape == RowShape.RUNNING) {
+                runCancelButton.setFocusedState(hasFocus && runIndex == 0);
+                runDoneButton.setFocusedState(hasFocus && runIndex == 1);
+                runCancelButton.setDimmed(dim);
+                runDoneButton.setDimmed(dim);
+            } else {
+                deadDoneButton.setFocusedState(hasFocus);
+                deadDoneButton.setDimmed(dim);
+            }
+            return;
+        }
+
         long p = pos();
-        boolean hasCues = session != null && session.hasCues();
-        enabled[0] = hasCues;
+        enabled[0] = hasCues();
         enabled[AUTO_SYNC_INDEX] = autoSyncState == null || autoSyncState.available;
         enabled[PREV_SEG_INDEX] = session != null && session.prevSegmentTarget(p) != ManualSyncSession.NO_TARGET;
         enabled[NEXT_SEG_INDEX] = session != null && session.nextSegmentTarget(p) != ManualSyncSession.NO_TARGET;
@@ -490,65 +710,57 @@ public class SyncView extends FrameLayout {
             if (e == buttonIndex) e = nextEnabled(buttonIndex, -1);
             buttonIndex = e;
         }
+        // The whole row dims as one when the cursor has gone somewhere else (into the dialogue list,
+        // or over to the sidebar): a sleeping group, not eight broken buttons.
+        boolean dimRow = !controls || !hasFocus;
         for (int i = 0; i < buttonViews.length; i++) {
-            TextView b = buttonViews[i];
-            if (!enabled[i]) {
-                b.setTextColor(COLOR_DISABLED);
-                b.setBackgroundColor(Color.TRANSPARENT);
-            } else if (controls && hasFocus && i == buttonIndex) {
-                b.setTextColor(0xFF000000);
-                b.setBackgroundColor(0xFFFFFFFF);
-            } else {
-                b.setTextColor(controls ? COLOR_FOCUS_TEXT : COLOR_DIM);
-                b.setBackgroundColor(Color.TRANSPARENT);
-            }
+            buttonViews[i].setEnabledState(enabled[i]);
+            buttonViews[i].setFocusedState(controls && hasFocus && i == buttonIndex);
+            buttonViews[i].setDimmed(dimRow);
         }
     }
 
     private void updateHint() {
-        if (zone == Zone.AUTO_SYNC_MENU) {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < AUTO_SYNC_MENU_OPTIONS.length; i++) {
-                if (i > 0) sb.append("    ");
-                sb.append(i == autoSyncMenuIndex ? "▸ " : "  ").append(AUTO_SYNC_MENU_OPTIONS[i]);
-            }
-            sb.append("   ·   OK: start   ·   Back: cancel");
-            hint.setText(sb.toString());
-            return;
-        }
-        if (zone == Zone.REVIEW) {
-            String proposal = autoSyncState != null ? autoSyncState.hint : "";
-            hint.setText(proposal + "   ·   OK: accept   ·   Back: reject");
-            return;
-        }
         if (zone == Zone.LIST) {
-            hint.setText("▲ ▼ choose line   ·   ◄ ► nudge   ·   OK: anchor here   ·   Back: cancel");
+            hint.setText(SubsText.hint("▲ ▼ *CHOOSE LINE* · ◄ ► *NUDGE* · OK: *ANCHOR HERE* · BACK: CANCEL"));
+            hint.setVisibility(VISIBLE);
             return;
         }
-        if (autoSyncState != null && !autoSyncState.available) {
-            // Unavailable reason ("Load an external subtitle first", "No media source", HLS, …) —
-            // never fail silently, per PLAN.md §8.
-            hint.setText(autoSyncState.unavailableReason != null ? autoSyncState.unavailableReason : "");
-        } else if (autoSyncState != null && autoSyncState.hint != null && !autoSyncState.hint.isEmpty()) {
-            // Covers both RUNNING progress ("Extracting audio… 34%") and terminal messages that
-            // aren't a confident-result proposal ("No confident match", "Cancelled",
-            // "Auto-sync failed: …") — those must reach the user too, not just errors.
-            hint.setText(autoSyncState.hint);
-        } else {
-            hint.setText("◄ ► move   ·   OK: select   ·   'Sync line' to anchor   ·   ◄ menu");
+        if (zone == Zone.REVIEW || zone == Zone.AUTO_SYNC_MENU || rowShape != RowShape.FULL) {
+            // Nothing to instruct: a modal states its own case, and a run in progress has taken the
+            // dialogue list away, so the keys the hint describes do not apply to anything.
+            hint.setVisibility(INVISIBLE);
+            return;
         }
+        hint.setVisibility(VISIBLE);
+        if (autoSyncState != null && !autoSyncState.available && hasCues()) {
+            // Manual sync still works, so the screen stays; the reason for the dead Auto-sync button
+            // goes here rather than taking over the whole screen. Never a silent failure.
+            hint.setText(SubsText.hint(upper(autoSyncState.unavailableReason)));
+        } else if (autoSyncState != null && autoSyncState.hint != null && !autoSyncState.hint.isEmpty()
+                && !autoSyncState.running) {
+            // Terminal messages that aren't a proposal: "No confident match", "Cancelled",
+            // "Auto-sync failed: …". Those must reach the user too, not just errors.
+            hint.setText(SubsText.hint(upper(autoSyncState.hint)));
+        } else {
+            hint.setText(SubsText.hint("◄ ► *MOVE* · OK: *SELECT* · 'SYNC LINE' TO ANCHOR · ◄ *MENU*"));
+        }
+    }
+
+    private static String upper(@Nullable String s) {
+        return s == null ? "" : s.toUpperCase(Locale.US);
     }
 
     private void updateReadout() {
         SyncState st = session != null ? session.state() : SyncState.empty();
         SyncTransform t = session != null ? session.transform() : SyncTransform.IDENTITY;
-        StringBuilder sb = new StringBuilder(String.format(Locale.ROOT,
-                "offset %+.2fs · nudge %+dms", t.getOffsetMs() / 1000.0, st.getNudgeMs()));
+        StringBuilder sb = new StringBuilder(String.format(Locale.US,
+                "OFFSET %+.2fS · NUDGE %+dMS", t.getOffsetMs() / 1000.0, st.getNudgeMs()));
         if (Math.abs(t.getScale() - 1.0) > 1e-6) {
-            sb.append(String.format(Locale.ROOT, " · scale %.4f", t.getScale()));
+            sb.append(String.format(Locale.US, " · SCALE %.4f", t.getScale()));
         }
         int anchors = st.getAnchors() != null ? st.getAnchors().size() : 0;
-        sb.append("   (").append(anchors).append(anchors == 1 ? " anchor)" : " anchors)");
+        sb.append(" · ").append(anchors).append(anchors == 1 ? " ANCHOR" : " ANCHORS");
         readout.setText(sb.toString());
     }
 
@@ -560,29 +772,16 @@ public class SyncView extends FrameLayout {
         return listener != null ? listener.currentPositionMs() : 0L;
     }
 
-    private TextView label(int sp, int color) {
-        TextView tv = new TextView(getContext());
-        tv.setTextColor(color);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
-        return tv;
-    }
-
-    private FrameLayout.LayoutParams lp(int gravity, int topMargin, int bottomMargin) {
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.gravity = gravity;
-        p.topMargin = topMargin;
-        p.bottomMargin = bottomMargin;
-        return p;
-    }
-
     private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+        return SubsTheme.dp(getContext(), v);
     }
 
     // --- list adapter ---
 
     private class CueAdapter extends RecyclerView.Adapter<CueAdapter.VH> {
+        private static final int MAX_WIDTH_DP = 680;
+        private static final int GUTTER_DP = 60;
+
         private int activeIndex = -1;
         private int selectedIndex = -1;
 
@@ -590,8 +789,16 @@ public class SyncView extends FrameLayout {
             if (idx == activeIndex) return;
             int old = activeIndex;
             activeIndex = idx;
-            if (old >= 0) notifyItemChanged(old);
-            if (idx >= 0) notifyItemChanged(idx);
+            // The two neighbours change with it: "near" is defined relative to the active line.
+            notifyAround(old);
+            notifyAround(idx);
+        }
+
+        private void notifyAround(int idx) {
+            if (idx < 0) return;
+            for (int i = Math.max(0, idx - 1); i <= idx + 1 && i < getItemCount(); i++) {
+                notifyItemChanged(i);
+            }
         }
 
         void setSelectedIndex(int idx) {
@@ -608,26 +815,68 @@ public class SyncView extends FrameLayout {
             Context ctx = parent.getContext();
             LinearLayout root = new LinearLayout(ctx);
             root.setOrientation(LinearLayout.VERTICAL);
+            root.setGravity(Gravity.CENTER_HORIZONTAL);
             root.setLayoutParams(new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            TextView divider = new TextView(ctx);
+            LinearLayout divider = new LinearLayout(ctx);
+            divider.setOrientation(LinearLayout.HORIZONTAL);
             divider.setGravity(Gravity.CENTER);
-            divider.setTextColor(SEGMENT_LABEL);
-            divider.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-            divider.setPadding(0, dp(16), 0, dp(16));
+            divider.setPadding(0, dp(9), 0, dp(9));
+            View ruleL = rule(ctx);
+            TextView gap = SubsTheme.labelSm(new TextView(ctx));
+            gap.setTextColor(SubsTheme.INK_3);
+            View ruleR = rule(ctx);
+            divider.addView(ruleL, ruleParams(ctx, false));
+            divider.addView(gap, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            divider.addView(ruleR, ruleParams(ctx, true));
             root.addView(divider, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            TextView tv = new TextView(ctx);
-            tv.setGravity(Gravity.CENTER);
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-            tv.setLineSpacing(0f, 1.05f);
-            tv.setPadding(dp(40), dp(9), dp(40), dp(9));
-            root.addView(tv, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            // A symmetric 60 · text · 60 grid: the start time lives in the left gutter and the
+            // dialogue still sits dead centre of the screen, which is where the eye rests.
+            LinearLayout lyric = new LinearLayout(ctx);
+            lyric.setOrientation(LinearLayout.HORIZONTAL);
+            lyric.setGravity(Gravity.CENTER_VERTICAL);
+            lyric.setPadding(dp(12), dp(7), dp(12), dp(7));
 
-            return new VH(root, tv, divider);
+            TextView time = SubsTheme.labelSm(new TextView(ctx));
+            time.setLetterSpacing(.06f);
+            time.setGravity(Gravity.END);
+            time.setPadding(0, 0, dp(14), 0);
+            time.setSingleLine(true);
+            lyric.addView(time, new LinearLayout.LayoutParams(
+                    dp(GUTTER_DP), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            TextView text = SubsTheme.bodyMd(new TextView(ctx));
+            text.setGravity(Gravity.CENTER);
+            text.setLineSpacing(0f, 1.15f);
+            lyric.addView(text, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            View spacer = new View(ctx);
+            lyric.addView(spacer, new LinearLayout.LayoutParams(dp(GUTTER_DP), 1));
+
+            LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                    dp(MAX_WIDTH_DP), ViewGroup.LayoutParams.WRAP_CONTENT);
+            llp.gravity = Gravity.CENTER_HORIZONTAL;
+            root.addView(lyric, llp);
+
+            return new VH(root, lyric, text, time, divider, gap);
+        }
+
+        private View rule(Context ctx) {
+            View v = new View(ctx);
+            v.setBackgroundColor(SubsTheme.SURFACE_4);
+            return v;
+        }
+
+        private LinearLayout.LayoutParams ruleParams(Context ctx, boolean right) {
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(46), dp(1));
+            if (right) p.leftMargin = dp(12); else p.rightMargin = dp(12);
+            p.gravity = Gravity.CENTER_VERTICAL;
+            return p;
         }
 
         @Override
@@ -635,15 +884,29 @@ public class SyncView extends FrameLayout {
             List<SubtitleEntry> cues = cues();
             SubtitleEntry e = cues.get(position);
             h.text.setText(String.join("\n", e.getLines()));
+            h.time.setText(clock(e.getStartMs()));
 
             boolean active = position == activeIndex;
             boolean selected = position == selectedIndex;
-            h.text.setTextColor(selected ? COLOR_FOCUS_TEXT : (active ? COLOR_ACTIVE : COLOR_DIM));
-            h.text.setBackgroundColor(selected ? FOCUS_BG : Color.TRANSPARENT);
-            h.text.setTextSize(TypedValue.COMPLEX_UNIT_SP, active || selected ? 20 : 18);
+            boolean near = !active && !selected && activeIndex >= 0 && Math.abs(position - activeIndex) == 1;
+
+            if (selected) {
+                h.lyric.setBackground(SubsShapes.rounded(getContext(), SubsTheme.INK, SubsTheme.RADIUS_ROW_DP));
+                h.text.setTextColor(SubsTheme.ON_SECONDARY);
+                h.text.setTypeface(SubsTheme.semibold(getContext()));
+                h.text.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, SubsTheme.BODY_LG_SP);
+                h.time.setTextColor(TIME_SELECTED);
+            } else {
+                h.lyric.setBackground(null);
+                h.text.setTextColor(active ? SubsTheme.PRIMARY : (near ? CUE_NEAR : CUE_FAR));
+                h.text.setTypeface(active ? SubsTheme.medium(getContext()) : SubsTheme.regular(getContext()));
+                h.text.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP,
+                        active ? SubsTheme.BODY_LG_SP : SubsTheme.BODY_MD_SP);
+                h.time.setTextColor(active ? TIME_ACTIVE : TIME_FAR);
+            }
 
             if (session != null && position > 0 && session.isSegmentStart(position)) {
-                h.divider.setText("— " + Math.round(session.silenceBefore(position) / 1000.0) + "s —");
+                h.gap.setText(Math.round(session.silenceBefore(position) / 1000.0) + "S");
                 h.divider.setVisibility(View.VISIBLE);
             } else {
                 h.divider.setVisibility(View.GONE);
@@ -656,13 +919,28 @@ public class SyncView extends FrameLayout {
         }
 
         class VH extends RecyclerView.ViewHolder {
+            final LinearLayout lyric;
             final TextView text;
-            final TextView divider;
-            VH(View root, TextView text, TextView divider) {
+            final TextView time;
+            final LinearLayout divider;
+            final TextView gap;
+
+            VH(View root, LinearLayout lyric, TextView text, TextView time, LinearLayout divider, TextView gap) {
                 super(root);
+                this.lyric = lyric;
                 this.text = text;
+                this.time = time;
                 this.divider = divider;
+                this.gap = gap;
             }
         }
+    }
+
+    /** {@code h:mm:ss} — a dialogue's start time, which past an hour is how the user reads it. */
+    private static String clock(long ms) {
+        long total = Math.max(0, ms) / 1000;
+        long h = total / 3600, m = (total % 3600) / 60, s = total % 60;
+        return h > 0 ? String.format(Locale.US, "%d:%02d:%02d", h, m, s)
+                : String.format(Locale.US, "%d:%02d", m, s);
     }
 }

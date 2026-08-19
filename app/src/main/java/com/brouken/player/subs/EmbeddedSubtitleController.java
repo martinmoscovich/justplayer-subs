@@ -91,8 +91,15 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
     @Nullable private Consumer<String> onHashReady;
 
     public interface Listener {
-        /** Progress text for the panel, or {@code null} when nothing is running. */
-        void onExtractionStatus(@Nullable String status);
+        /**
+         * The read of an embedded track, as a headline plus a fraction — {@code null} title when
+         * nothing is running. Kept apart rather than pre-joined into one string because the panel
+         * draws them as a title, a percentage and a bar, and re-splitting a formatted string to get
+         * there would be parsing our own output.
+         *
+         * @param fraction 0..1, negative when unknown
+         */
+        void onExtractionStatus(@Nullable String title, float fraction);
     }
 
     public EmbeddedSubtitleController(Context context, Handler mainHandler,
@@ -315,8 +322,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
     public void onProgress(TranslationProgress progress) {
         switch (progress.getStatus()) {
             case RUNNING:
-                notifyStatus(String.format(Locale.US, "Reading subtitles from the video… %d%%",
-                        Math.round(progress.getSourceFraction() * 100)));
+                notifyStatus("Reading subtitles from the video", (float) progress.getSourceFraction());
                 break;
             case DONE:
                 SubtitleFile file = lastEmittedFile;
@@ -359,8 +365,12 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         if (callback != null) callback.onError(new RuntimeException(message));
     }
 
-    private void notifyStatus(@Nullable String status) {
-        if (listener != null) listener.onExtractionStatus(status);
+    private void notifyStatus(@Nullable String title, float fraction) {
+        if (listener != null) listener.onExtractionStatus(title, fraction);
+    }
+
+    private void notifyStatus(@Nullable String title) {
+        notifyStatus(title, -1f);
     }
 
     /** True when what is on screen right now came from the cache rather than a fresh read. */

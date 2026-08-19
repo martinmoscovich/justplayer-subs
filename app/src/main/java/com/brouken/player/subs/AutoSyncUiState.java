@@ -14,16 +14,29 @@ public final class AutoSyncUiState {
     @Nullable public final String unavailableReason;
     public final boolean running;
     public final String hint;
+    /** RUNNING only: the phase as a headline ("Extracting audio"), with no percentage glued on —
+     *  the screen shows the number as its own line and as a bar, so it needs them apart. */
+    @Nullable public final String runTitle;
+    /** RUNNING only: 0..1, negative when the phase can't say. */
+    public final float runFraction;
     public final boolean hasConfidentResult;
     public final double offsetSeconds;
     public final double uniqueness;
 
     private AutoSyncUiState(boolean available, @Nullable String unavailableReason, boolean running,
                              String hint, boolean hasConfidentResult, double offsetSeconds, double uniqueness) {
+        this(available, unavailableReason, running, hint, null, -1f, hasConfidentResult, offsetSeconds, uniqueness);
+    }
+
+    private AutoSyncUiState(boolean available, @Nullable String unavailableReason, boolean running,
+                             String hint, @Nullable String runTitle, float runFraction,
+                             boolean hasConfidentResult, double offsetSeconds, double uniqueness) {
         this.available = available;
         this.unavailableReason = unavailableReason;
         this.running = running;
         this.hint = hint;
+        this.runTitle = runTitle;
+        this.runFraction = runFraction;
         this.hasConfidentResult = hasConfidentResult;
         this.offsetSeconds = offsetSeconds;
         this.uniqueness = uniqueness;
@@ -37,8 +50,8 @@ public final class AutoSyncUiState {
         return new AutoSyncUiState(true, null, false, "", false, 0, 0);
     }
 
-    static AutoSyncUiState running(String hint) {
-        return new AutoSyncUiState(true, null, true, hint, false, 0, 0);
+    static AutoSyncUiState running(String hint, String title, float fraction) {
+        return new AutoSyncUiState(true, null, true, hint, title, fraction, false, 0, 0);
     }
 
     /** DONE with a confident result — {@link SyncView} shows Zone.REVIEW for this state. */

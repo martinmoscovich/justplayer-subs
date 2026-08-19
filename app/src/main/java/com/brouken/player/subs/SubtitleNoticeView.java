@@ -1,13 +1,10 @@
 package com.brouken.player.subs;
 
 import android.content.Context;
-import android.graphics.Color;
 import android.os.Handler;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
-import android.view.View;
-import android.view.ViewGroup;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -15,6 +12,12 @@ import androidx.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.List;
+
+import com.brouken.player.R;
+import com.brouken.player.subs.ui.SubsButton;
+import com.brouken.player.subs.ui.SubsIcons;
+import com.brouken.player.subs.ui.SubsShapes;
+import com.brouken.player.subs.ui.SubsTheme;
 
 /**
  * The transient bar shown when a subtitle is picked automatically: a message plus one or two
@@ -34,13 +37,10 @@ public class SubtitleNoticeView extends LinearLayout {
 
     private static final long VISIBLE_MS = 8000;
 
-    private static final int TEAL = 0xFF4DD0E1;
-    private static final int WHITE = 0xFFFFFFFF;
-
     private final Handler handler;
     private final TextView message;
     private final LinearLayout buttonRow;
-    private final List<TextView> buttons = new ArrayList<>();
+    private final List<SubsButton> buttons = new ArrayList<>();
     private final List<Runnable> actions = new ArrayList<>();
     private int focusIndex;
     @Nullable private Listener listener;
@@ -52,13 +52,19 @@ public class SubtitleNoticeView extends LinearLayout {
         this.handler = handler;
         setOrientation(HORIZONTAL);
         setGravity(Gravity.CENTER_VERTICAL);
-        setBackgroundColor(0xE6000000);
-        setPadding(dp(16), dp(10), dp(16), dp(10));
+        // Nearly opaque rather than the panel's 75%: this one floats over moving video with no veil
+        // behind it, and a message you have eight seconds to read cannot afford the contrast.
+        setBackground(SubsShapes.rounded(context, 0xEB0E1416, SubsTheme.EDGE, SubsTheme.RADIUS_PANEL_DP));
+        setPadding(dp(14), dp(10), dp(14), dp(10));
         setVisibility(GONE);
 
-        message = new TextView(context);
-        message.setTextColor(WHITE);
-        message.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        ImageView glyph = SubsIcons.icon(context, R.drawable.subtitle_ic_subtitles, SubsTheme.PRIMARY, 20f);
+        LayoutParams glyphLp = new LayoutParams(dp(20), dp(20));
+        glyphLp.rightMargin = dp(9);
+        addView(glyph, glyphLp);
+
+        message = SubsTheme.bodyLg(new TextView(context));
+        message.setTextColor(SubsTheme.INK);
         addView(message, new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
 
         buttonRow = new LinearLayout(context);
@@ -181,29 +187,19 @@ public class SubtitleNoticeView extends LinearLayout {
     }
 
     private void addButton(String text, Runnable action) {
-        TextView tv = new TextView(getContext());
-        tv.setText(text);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        tv.setGravity(Gravity.CENTER);
-        tv.setPadding(dp(14), dp(6), dp(14), dp(6));
-        tv.setOnClickListener(v -> {
+        SubsButton b = new SubsButton(getContext(), text);
+        b.setOnClickListener(v -> {
             restartTimer();
             action.run();
         });
-        LayoutParams p = new LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.leftMargin = dp(8);
-        tv.setLayoutParams(p);
-        buttonRow.addView(tv);
-        buttons.add(tv);
+        buttonRow.addView(b, b.rowParams());
+        buttons.add(b);
         actions.add(action);
     }
 
     private void styleButtons() {
         for (int i = 0; i < buttons.size(); i++) {
-            TextView tv = buttons.get(i);
-            boolean isFocus = i == focusIndex;
-            tv.setTextColor(isFocus ? Color.BLACK : TEAL);
-            tv.setBackgroundColor(isFocus ? WHITE : 0x334DD0E1);
+            buttons.get(i).setFocusedState(i == focusIndex);
         }
     }
 

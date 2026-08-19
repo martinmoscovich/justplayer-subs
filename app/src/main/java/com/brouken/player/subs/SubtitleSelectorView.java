@@ -1,13 +1,15 @@
 package com.brouken.player.subs;
 
 import android.content.Context;
-import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -15,26 +17,44 @@ import android.widget.TextView;
 import androidx.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import com.brouken.player.R;
+import com.brouken.player.subs.ui.SubsCenteredBlock;
+import com.brouken.player.subs.ui.SubsChip;
+import com.brouken.player.subs.ui.SubsFocus;
+import com.brouken.player.subs.ui.SubsIcons;
+import com.brouken.player.subs.ui.SubsShapes;
+import com.brouken.player.subs.ui.SubsTab;
+import com.brouken.player.subs.ui.SubsTheme;
+
 import subtitleengine.provider.MatchStrategy;
 import subtitleengine.selection.SubtitleOptionSorter;
 
 /**
- * Subtitle-source selector: a top tab bar — <b>Preferred</b> (the user's target languages) /
- * <b>Others</b>, each backed by the engine's {@link SubtitleOptionSorter} — over a vertical list
- * for the active tab, sectioned by source (<b>Embedded</b> / <b>External</b> / <b>Provider</b>,
- * empty sections hidden). A <b>Done</b> button sits at the bottom of the list.
- * Picking a subtitle moves focus to Done (a second OK closes the panel); ◄ switches to the sync
- * screen, Back opens the sidebar menu; ◄/► on the tab bar switches tabs, ▼ enters the list, ▲ from
- * the first row returns to the tab bar. The list is height-bound to the available space (a nested
- * {@link ScrollView}) and follows the focused row via real Android focus, so it never scrolls past
- * what's on screen.
+ * Subtitle-source selector: a tab row — <b>Preferred</b> (the user's target languages) /
+ * <b>Others</b>, each backed by the engine's {@link SubtitleOptionSorter} — over a vertical list for
+ * the active tab, sectioned by source (<b>Embedded</b> / <b>External</b> / <b>Provider</b>, empty
+ * sections hidden), with a <b>Done</b> bar anchored below it, outside the scroll.
+ *
+ * <p>Each option is a card: a mark, a flag, the name, and chips. The chips replace the
+ * double-space-concatenated meta text this screen used to carry, and they are split by <em>what kind
+ * of fact</em> they are — properties of the file sit next to the title, states of the row are
+ * right-aligned so that column can be scanned straight down.
+ *
+ * <p>The row that is <b>playing</b> and the row that has the <b>focus</b> are both on screen at once
+ * and must not be confused: focus is a solid white card, playing is a cyan edge bar plus a play glyph
+ * plus a cyan label. When they land on the same row the white wins and the play glyph survives it —
+ * a difference of <em>shape</em>, which the colour inversion cannot take away.
+ *
+ * <p>Which subtitle is currently in use is no longer stated here at all: it lives at the foot of the
+ * sidebar (see {@code SubsSelectedBlock}), in one place for all three screens.
  */
-public class SubtitleSelectorView extends LinearLayout {
+public class SubtitleSelectorView extends FrameLayout {
 
     public interface Listener {
         void onSelect(String optionId);
@@ -47,36 +67,38 @@ public class SubtitleSelectorView extends LinearLayout {
     private enum TabKey { PREFERRED, OTHERS }
     private enum Focus { TABS, LIST }
 
-    /** One option row: a container (for background), the left-aligned label, the right-aligned
-     *  rating/downloads meta text, and the "PLAYING" badge — the last two are {@code null} when the
-     *  row has no meta / is not the selected one. */
-    private static final class Row {
-        final View container;
-        final TextView main;
-        @Nullable final TextView meta;
-        @Nullable final TextView badge;
+    private static final float ROW_H_DP = 40f;
+    private static final float EDGE_BAR_DP = 4f;
 
-        Row(View container, TextView main, @Nullable TextView meta, @Nullable TextView badge) {
+    /** One option row's views, kept so styling never has to walk the hierarchy again. */
+    private static final class Row {
+        final LinearLayout container;
+        final GradientDrawable bg;
+        final View edgeBar;
+        final ImageView mark;
+        final TextView label;
+        final List<SubsChip> chips = new ArrayList<>();
+        @Nullable SubsFocus.Skin painted;
+        boolean spinning;
+
+        Row(LinearLayout container, GradientDrawable bg, View edgeBar, ImageView mark, TextView label) {
             this.container = container;
-            this.main = main;
-            this.meta = meta;
-            this.badge = badge;
+            this.bg = bg;
+            this.edgeBar = edgeBar;
+            this.mark = mark;
+            this.label = label;
         }
     }
 
-    private static final int TEAL = 0xFF4DD0E1;
-    private static final int WHITE = 0xFFFFFFFF;
-    private static final int DIM = 0xFF90A4AE;
-    private static final int EMPTY_TAB = 0xFF4A5A63;
-    private static final int ERROR = 0xFFEF9A9A;
-    private static final int HEADER = 0xFF7A8A93;
-
-    private final TextView statusLine;
-    private final TextView preferredTabView;
-    private final TextView othersTabView;
+    private final LinearLayout tabBar;
+    private final SubsTab preferredTabView;
+    private final SubsTab othersTabView;
     private final ScrollView scroll;
     private final LinearLayout column;
-    private final TextView doneButton;
+    private final SubsCenteredBlock centeredBlock;
+    private final TextView doneBar;
+    private final GradientDrawable doneBg;
+    @Nullable private SubsFocus.Skin donePainted;
     private Listener listener;
 
     private final Map<String, SubtitleOption> byId = new HashMap<>();
@@ -92,49 +114,61 @@ public class SubtitleSelectorView extends LinearLayout {
 
     public SubtitleSelectorView(Context c) {
         super(c);
-        setOrientation(VERTICAL);
 
-        // Above the tabs, so the answer to "which one am I watching?" is on screen whatever the
-        // list is scrolled to, and whichever tab the selected row lives in.
-        statusLine = new TextView(c);
-        statusLine.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        statusLine.setSingleLine(true);
-        statusLine.setEllipsize(TextUtils.TruncateAt.END);
-        statusLine.setPadding(dp(16), dp(12), dp(16), dp(4));
-        addView(statusLine, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        LinearLayout col = new LinearLayout(c);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(24), dp(16), dp(24), dp(14));
+        addView(col, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        LinearLayout tabBar = new LinearLayout(c);
+        tabBar = new LinearLayout(c);
         tabBar.setOrientation(LinearLayout.HORIZONTAL);
-        tabBar.setPadding(dp(16), dp(12), dp(16), dp(4));
-        preferredTabView = tabItem("Preferred");
-        othersTabView = tabItem("Others");
-        tabBar.addView(preferredTabView, tabItemParams());
-        tabBar.addView(othersTabView, tabItemParams());
-        addView(tabBar, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
+        preferredTabView = new SubsTab(c, "Preferred");
+        othersTabView = new SubsTab(c, "Others");
+        tabBar.addView(preferredTabView, preferredTabView.rowParams());
+        tabBar.addView(othersTabView, othersTabView.rowParams());
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tlp.topMargin = dp(14);
+        col.addView(tabBar, tlp);
+
+        // The list and the "nothing to show" block occupy the same box: only one of them is ever up.
+        FrameLayout stage = new FrameLayout(c);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        slp.topMargin = dp(16);
+        col.addView(stage, slp);
 
         scroll = new ScrollView(c);
         scroll.setFillViewport(true);
+        // No scrollbar: the panel has no pointer to drag one with, and the list already reports its
+        // own position by moving the focused card into view.
+        scroll.setVerticalScrollBarEnabled(false);
         column = new LinearLayout(c);
         column.setOrientation(LinearLayout.VERTICAL);
-        column.setPadding(dp(16), dp(4), dp(16), dp(12));
         scroll.addView(column, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
-        // weight=1 + height=0 bounds the list to whatever space is left under the tab bar and the
-        // Done button below, instead of letting it grow past the screen.
-        addView(scroll, new LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f));
+        stage.addView(scroll, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // Built once (not per-rebuild): pinned to the bottom, outside the scrollable list, so it's
-        // always reachable regardless of how many subtitles there are.
-        doneButton = new TextView(c);
-        doneButton.setText("Done");
-        doneButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-        doneButton.setGravity(Gravity.CENTER);
-        doneButton.setPadding(dp(14), dp(12), dp(14), dp(12));
-        doneButton.setFocusable(true);
+        centeredBlock = new SubsCenteredBlock(c);
+        centeredBlock.setVisibility(GONE);
+        stage.addView(centeredBlock, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Built once and pinned below the list, outside the scroll, so it stays reachable however
+        // many subtitles there are. Wide rather than a pill: an unmissable target for a D-pad.
+        doneBar = SubsTheme.labelLg(new TextView(c));
+        doneBar.setText("Done");
+        doneBar.setGravity(Gravity.CENTER);
+        doneBar.setTextColor(SubsTheme.INK);
+        doneBg = SubsShapes.rounded(c, SubsTheme.SURFACE_3, SubsTheme.RADIUS_ROW_DP);
+        doneBar.setBackground(doneBg);
+        doneBar.setFocusable(true);
         LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
-                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        dlp.setMargins(dp(16), dp(8), dp(16), dp(16));
-        addView(doneButton, dlp);
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(40));
+        dlp.topMargin = dp(12);
+        col.addView(doneBar, dlp);
     }
 
     public void setListener(Listener l) {
@@ -183,7 +217,7 @@ public class SubtitleSelectorView extends LinearLayout {
             TabKey target = tabContaining(selectedId);
             if (target != null) activeTab = target;
             rebuildOrderedForActiveTab();
-            focusIndex = indexOfSelected();
+            focusIndex = ordered.isEmpty() ? 0 : indexOfSelected();
             rebuild();
         } else {
             styleAll();
@@ -233,8 +267,9 @@ public class SubtitleSelectorView extends LinearLayout {
     private boolean handleListKey(int keyCode) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_UP:
+                // The tab row is only worth entering when there is a second tab to switch to.
                 if (focusIndex == 0) {
-                    focus = Focus.TABS;
+                    if (tabsVisible()) focus = Focus.TABS;
                 } else {
                     focusIndex--;
                 }
@@ -317,245 +352,305 @@ public class SubtitleSelectorView extends LinearLayout {
         return 0;
     }
 
+    /** With nothing to choose between, a tab row is two labels explaining an empty screen. */
+    private boolean tabsVisible() {
+        return grouping.anyOptions;
+    }
+
     private void rebuild() {
+        for (Row r : rowViews) SubsIcons.stopSpin(r.mark);
         column.removeAllViews();
         rowViews.clear();
 
+        boolean any = grouping.anyOptions;
+        tabBar.setVisibility(tabsVisible() ? VISIBLE : GONE);
+
+        if (!any && !loadingMore) {
+            scroll.setVisibility(GONE);
+            centeredBlock.show(R.drawable.subtitle_ic_subtitles, false, "No subtitles available",
+                    "Nothing embedded, nothing found online", -1f);
+            if (focus == Focus.TABS) focus = Focus.LIST;
+            focusIndex = 0;
+            styleAll();
+            return;
+        }
+        centeredBlock.hide();
+        scroll.setVisibility(VISIBLE);
+
         SubtitleOptionSorter.LanguageGroup group = languageGroup(activeTab);
+        boolean first = true;
         for (SubtitleOptionSorter.SourceGroup g : group.sourceGroups) {
-            column.addView(header(g.title));
+            column.addView(sectionHeader(g.title), sectionParams(first));
+            first = false;
             for (String id : g.optionIds) {
                 SubtitleOption o = byId.get(id);
                 if (o != null) addRow(o);
             }
         }
-        if (loadingMore) column.addView(row("⟳ loading more…", DIM));
-        if (ordered.isEmpty() && !loadingMore) {
-            column.addView(row("No subtitles available", DIM));
-        }
+        if (loadingMore) column.addView(quietRow("loading more…"));
 
         styleAll();
     }
 
+    // --- row construction ---
+
     private void addRow(SubtitleOption o) {
-        LinearLayout container = new LinearLayout(getContext());
+        Context c = getContext();
+        LinearLayout container = new LinearLayout(c);
         container.setOrientation(LinearLayout.HORIZONTAL);
-        container.setPadding(dp(14), dp(10), dp(14), dp(10));
+        container.setGravity(Gravity.CENTER_VERTICAL);
+        container.setPadding(0, 0, dp(16), 0);
         container.setFocusable(true);
+        GradientDrawable bg = SubsShapes.rounded(c, SubsTheme.SURFACE_2, SubsTheme.EDGE, SubsTheme.RADIUS_ROW_DP);
+        container.setBackground(bg);
         LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        cp.topMargin = dp(2);
+                ViewGroup.LayoutParams.MATCH_PARENT, dp((int) ROW_H_DP));
+        cp.leftMargin = dp(4);
+        cp.rightMargin = dp(4);
+        cp.bottomMargin = dp(6);
         container.setLayoutParams(cp);
 
-        TextView main = new TextView(getContext());
-        main.setText(mainText(o));
-        main.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        main.setSingleLine(true);
-        main.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams mainLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        main.setLayoutParams(mainLp);
-        container.addView(main);
+        // The playing row's 4dp accent: a real child rather than a border, so it can keep its colour
+        // when the white focus fill takes the rest of the row.
+        View edgeBar = new View(c);
+        edgeBar.setBackground(SubsShapes.leftRounded(c, SubsTheme.PRIMARY_CONTAINER, SubsTheme.RADIUS_ROW_DP));
+        edgeBar.setVisibility(GONE);
+        container.addView(edgeBar, new LinearLayout.LayoutParams(
+                dp((int) EDGE_BAR_DP), ViewGroup.LayoutParams.MATCH_PARENT));
 
-        TextView meta = null;
-        String metaText = metaText(o);
-        if (!metaText.isEmpty()) {
-            meta = new TextView(getContext());
-            meta.setText(metaText);
-            meta.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-            meta.setGravity(Gravity.END);
-            LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(
+        ImageView mark = SubsIcons.icon(c, R.drawable.subtitle_ic_circle, SubsTheme.INK_3, 18f);
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(dp(18), dp(18));
+        mlp.leftMargin = dp(16);
+        mlp.rightMargin = dp(12);
+        container.addView(mark, mlp);
+
+        String flag = LanguageFlags.flagFor(o.language);
+        if (flag != null) {
+            TextView flagView = new TextView(c);
+            flagView.setText(flag);
+            flagView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f);
+            flagView.setIncludeFontPadding(false);
+            LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            metaLp.leftMargin = dp(12);
-            meta.setLayoutParams(metaLp);
-            container.addView(meta);
+            flp.rightMargin = dp(12);
+            container.addView(flagView, flp);
         }
 
-        // The selected row also turns teal, but focus paints a row white — the badge is what keeps
-        // the current choice visible while the user moves the highlight over it.
-        TextView badge = null;
-        if (o.id.equals(selectedId)) {
-            badge = new TextView(getContext());
-            badge.setText("PLAYING");
-            badge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-            badge.setTextColor(0xFF00251F);
-            badge.setBackgroundColor(TEAL);
-            badge.setPadding(dp(8), dp(2), dp(8), dp(2));
-            LinearLayout.LayoutParams badgeLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            badgeLp.leftMargin = dp(12);
-            badgeLp.gravity = Gravity.CENTER_VERTICAL;
-            badge.setLayoutParams(badgeLp);
-            container.addView(badge);
+        TextView label = SubsTheme.bodyLg(new TextView(c));
+        label.setText(titleFor(o, flag != null));
+        label.setSingleLine(true);
+        label.setEllipsize(TextUtils.TruncateAt.END);
+        // Sized to its text, capped, rather than weighted: the chips have to stay welded to the end
+        // of the name (that is what makes them read as facts about it), and a weighted label grows
+        // into the spare room and drags them off to the right. The cap is what an unusually long
+        // track name ellipsizes at, so a full chip row always fits beside it.
+        label.setMaxWidth(dp(300));
+        container.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        Row row = new Row(container, bg, edgeBar, mark, label);
+
+        // Facts about the file, pinned to the title.
+        addChip(container, row, o.format != null ? new SubsChip(c, SubsChip.Kind.FORMAT, o.format) : null, 2);
+        addChip(container, row, matchChip(c, o), 0);
+        if (o.rating > 0) {
+            addChip(container, row, new SubsChip(c, SubsChip.Kind.STAT,
+                    "★ " + String.format(Locale.US, "%.1f", o.rating)), 0);
+        }
+        if (o.downloadCount > 0) {
+            addChip(container, row, new SubsChip(c, SubsChip.Kind.STAT, "⬇ " + compactCount(o.downloadCount)), 0);
+        }
+
+        View spacer = new View(c);
+        container.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
+
+        // States of the row, right-aligned so the column reads straight down.
+        if (o.state == SubtitleOption.State.LOADING) {
+            addChip(container, row, new SubsChip(c, SubsChip.Kind.BUSY, "Downloading…"), 0);
+        } else if (o.state == SubtitleOption.State.ERROR) {
+            addChip(container, row, new SubsChip(c, SubsChip.Kind.FAIL, "Failed"), 0);
+        }
+        // Translated implies extracted (translating an embedded track needs its cues first) — only
+        // the higher one is shown, never both stacked.
+        if (o.translated) {
+            addChip(container, row, new SubsChip(c, SubsChip.Kind.STATE, "Translated"), 0);
+        } else if (o.extracted) {
+            addChip(container, row, new SubsChip(c, SubsChip.Kind.STATE, "Extracted"), 0);
+        }
+        // Independent of the chip above — syncing and translating are unrelated actions on the same
+        // subtitle, so both can show together.
+        if (o.synced) {
+            addChip(container, row, new SubsChip(c, SubsChip.Kind.STATE, "Synced"), 0);
         }
 
         column.addView(container);
-        rowViews.add(new Row(container, main, meta, badge));
+        rowViews.add(row);
     }
+
+    private void addChip(LinearLayout container, Row row, @Nullable SubsChip chip, int extraLeftDp) {
+        if (chip == null) return;
+        LinearLayout.LayoutParams p = chip.gapParams();
+        p.leftMargin += dp(extraLeftDp);
+        container.addView(chip, p);
+        row.chips.add(chip);
+    }
+
+    @Nullable
+    private static SubsChip matchChip(Context c, SubtitleOption o) {
+        // TITLE is the least trustworthy match and not worth calling out — see MatchStrategy.
+        if (o.matchStrategy == MatchStrategy.HASH) return new SubsChip(c, SubsChip.Kind.MATCH, "Hash");
+        if (o.matchStrategy == MatchStrategy.MEDIA_ID) return new SubsChip(c, SubsChip.Kind.MATCH, "IMDB");
+        return null;
+    }
+
+    /**
+     * The name without the language code the label already carries — the flag says the language now,
+     * and dropping the code is what leaves room for the chips. Only stripped when there <em>is</em> a
+     * flag: with an unrecognised language the code is the only clue left, so it stays.
+     */
+    static String titleFor(SubtitleOption o, boolean hasFlag) {
+        String label = o.label;
+        if (!hasFlag || o.language == null) return label;
+        String code = o.language.toUpperCase(Locale.ROOT);
+        for (String sep : new String[]{" · ", " - "}) {
+            String prefix = code + sep;
+            if (label.length() > prefix.length() && label.toUpperCase(Locale.ROOT).startsWith(prefix)) {
+                return label.substring(prefix.length());
+            }
+        }
+        return label;
+    }
+
+    /** "4.8k", not "4,783": at three metres the order of magnitude is the whole message. */
+    static String compactCount(int n) {
+        if (n < 1000) return String.valueOf(n);
+        if (n < 1_000_000) return String.format(Locale.US, "%.1fk", n / 1000.0);
+        return String.format(Locale.US, "%.1fM", n / 1_000_000.0);
+    }
+
+    private TextView sectionHeader(String text) {
+        TextView tv = SubsTheme.labelSm(new TextView(getContext()));
+        tv.setText(text.toUpperCase(Locale.ROOT));
+        tv.setTextColor(SubsTheme.INK_3);
+        tv.setGravity(Gravity.CENTER_VERTICAL);
+        tv.setHeight(dp(26));
+        // The 2dp rule the design puts before the header, drawn as a compound drawable so the header
+        // stays one view: a section header is a label, not a layout.
+        android.graphics.drawable.GradientDrawable tick =
+                SubsShapes.rounded(getContext(), SubsTheme.OUTLINE, 1f);
+        tick.setSize(dp(2), dp(13));
+        tv.setCompoundDrawablesWithIntrinsicBounds(tick, null, null, null);
+        tv.setCompoundDrawablePadding(dp(9));
+        tv.setPadding(dp(4), 0, 0, 0);
+        return tv;
+    }
+
+    private LinearLayout.LayoutParams sectionParams(boolean first) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.topMargin = first ? 0 : dp(14);
+        p.bottomMargin = dp(4);
+        return p;
+    }
+
+    /** A row that says something is happening but is not a target: no card, no focus, centred. */
+    private LinearLayout quietRow(String text) {
+        Context c = getContext();
+        LinearLayout r = new LinearLayout(c);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER);
+        ImageView spinner = SubsIcons.icon(c, R.drawable.subtitle_ic_spinner, SubsTheme.INK_3, 18f);
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(dp(18), dp(18));
+        sp.rightMargin = dp(9);
+        r.addView(spinner, sp);
+        SubsIcons.spin(spinner);
+        TextView tv = SubsTheme.bodyMd(new TextView(c));
+        tv.setText(text);
+        tv.setTextColor(SubsTheme.INK_3);
+        r.addView(tv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        r.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(32)));
+        return r;
+    }
+
+    // --- styling ---
 
     private void styleAll() {
-        styleStatusLine();
         styleTabBar();
         styleRows();
-    }
-
-    private void styleStatusLine() {
-        SubtitleOption sel = selectedId != null ? byId.get(selectedId) : null;
-        if (sel == null) {
-            statusLine.setText("No subtitle selected");
-            statusLine.setTextColor(DIM);
-            return;
-        }
-        StringBuilder sb = new StringBuilder();
-        switch (sel.state) {
-            case LOADING: sb.append("⟳ Loading: "); break;
-            case ERROR:   sb.append("⚠ Failed: "); break;
-            default:      sb.append("▶ Now showing: "); break;
-        }
-        String flag = LanguageFlags.flagFor(sel.language);
-        if (flag != null) sb.append(flag).append(' ');
-        sb.append(sel.label);
-        if (sel.fromCache && sel.state == SubtitleOption.State.READY) sb.append("  ·  cached");
-        statusLine.setText(sb.toString());
-        statusLine.setTextColor(sel.state == SubtitleOption.State.ERROR ? ERROR : TEAL);
+        styleDone();
     }
 
     private void styleTabBar() {
-        styleTab(preferredTabView, TabKey.PREFERRED);
-        styleTab(othersTabView, TabKey.OTHERS);
-    }
-
-    private void styleTab(TextView tv, TabKey key) {
-        boolean empty = languageGroup(key).isEmpty();
-        boolean active = activeTab == key;
-        boolean tabFocused = focused && focus == Focus.TABS && active;
-        if (empty) {
-            tv.setTextColor(EMPTY_TAB);
-            tv.setBackgroundColor(Color.TRANSPARENT);
-        } else if (tabFocused) {
-            tv.setTextColor(0xFF000000);
-            tv.setBackgroundColor(WHITE);
-        } else if (active) {
-            tv.setTextColor(TEAL);
-            tv.setBackgroundColor(0x334DD0E1);
-        } else {
-            tv.setTextColor(DIM);
-            tv.setBackgroundColor(Color.TRANSPARENT);
-        }
+        boolean preferredEmpty = languageGroup(TabKey.PREFERRED).isEmpty();
+        boolean othersEmpty = languageGroup(TabKey.OTHERS).isEmpty();
+        boolean tabsFocused = focused && focus == Focus.TABS;
+        preferredTabView.setState(tabsFocused && activeTab == TabKey.PREFERRED,
+                activeTab == TabKey.PREFERRED, preferredEmpty, true);
+        othersTabView.setState(tabsFocused && activeTab == TabKey.OTHERS,
+                activeTab == TabKey.OTHERS, othersEmpty, true);
     }
 
     private void styleRows() {
         for (int i = 0; i < rowViews.size() && i < ordered.size(); i++) {
             Row rv = rowViews.get(i);
             SubtitleOption o = ordered.get(i);
-            boolean isSel = o.id.equals(selectedId);
+            boolean playing = o.id.equals(selectedId);
             boolean isFocus = focused && focus == Focus.LIST && i == focusIndex;
-            int mainColor;
-            if (isFocus) {
-                rv.container.setBackgroundColor(WHITE);
-                mainColor = 0xFF000000;
-            } else {
-                rv.container.setBackgroundColor(isSel ? 0x334DD0E1 : Color.TRANSPARENT);
-                mainColor = o.state == SubtitleOption.State.ERROR ? ERROR : (isSel ? TEAL : WHITE);
-            }
-            rv.main.setTextColor(mainColor);
-            if (rv.meta != null) rv.meta.setTextColor(isFocus ? mainColor : DIM);
-            // A real focus request makes the enclosing ScrollView auto-scroll the row into view,
-            // so the list never leaves the currently focused item off-screen.
+            boolean error = o.state == SubtitleOption.State.ERROR;
+
+            int fill = isFocus ? SubsTheme.INK : (playing ? SubsTheme.PRIMARY_14 : SubsTheme.SURFACE_2);
+            int stroke = isFocus ? SubsTheme.INK : (playing ? SubsTheme.PRIMARY_28 : SubsTheme.EDGE);
+            int ink = isFocus ? SubsTheme.ON_SECONDARY
+                    : (error ? SubsTheme.ERROR : (playing ? SubsTheme.PRIMARY : SubsTheme.INK));
+            SubsFocus.Skin to = new SubsFocus.Skin(fill, stroke, ink);
+            SubsFocus.apply(rv.container, rv.bg, rv.painted, to,
+                    Collections.singletonList(rv.label), true, 1f);
+            rv.painted = to;
+
+            rv.edgeBar.setVisibility(playing ? VISIBLE : GONE);
+            styleMark(rv, o, playing, isFocus, error);
+            for (SubsChip chip : rv.chips) chip.setOnLight(isFocus);
+
+            // A real focus request makes the enclosing ScrollView bring the row into view, so the
+            // list never leaves the focused item off-screen.
             if (isFocus) rv.container.requestFocus();
         }
+    }
+
+    /**
+     * The mark is the one signal that survives every recolouring, so it is set by <em>shape</em>
+     * first: play for the row in use, a ring for the rest, a spinner while it loads, a warning when
+     * it failed. Colour only ranks it afterwards.
+     */
+    private void styleMark(Row rv, SubtitleOption o, boolean playing, boolean isFocus, boolean error) {
+        boolean loading = o.state == SubtitleOption.State.LOADING;
+        int icon = loading ? R.drawable.subtitle_ic_spinner
+                : error ? R.drawable.subtitle_ic_warning
+                : playing ? R.drawable.subtitle_ic_play
+                : R.drawable.subtitle_ic_circle;
+        rv.mark.setImageResource(icon);
+        if (loading != rv.spinning) {
+            rv.spinning = loading;
+            if (loading) SubsIcons.spin(rv.mark); else SubsIcons.stopSpin(rv.mark);
+        }
+        int tint = isFocus ? SubsTheme.ON_SECONDARY
+                : (error ? SubsTheme.ERROR : (playing ? SubsTheme.PRIMARY_CONTAINER : SubsTheme.INK_3));
+        SubsIcons.tint(rv.mark, tint);
+    }
+
+    private void styleDone() {
         boolean doneFocus = focused && focus == Focus.LIST && focusIndex >= ordered.size();
-        doneButton.setTextColor(doneFocus ? 0xFF000000 : WHITE);
-        doneButton.setBackgroundColor(doneFocus ? WHITE : 0x33FFFFFF);
-        if (doneFocus) doneButton.requestFocus();
-    }
-
-    private String mainText(SubtitleOption o) {
-        String prefix = o.id.equals(selectedId) ? "● " : "○ ";
-        String flag = LanguageFlags.flagFor(o.language);
-        if (flag != null) prefix = prefix + flag + " ";
-        if (o.state == SubtitleOption.State.LOADING) return prefix + o.label + "  ⟳";
-        if (o.state == SubtitleOption.State.ERROR) return prefix + o.label + "  ⚠";
-        return prefix + o.label;
-    }
-
-    private String metaText(SubtitleOption o) {
-        StringBuilder sb = new StringBuilder();
-        // Only ever set when a sibling option shares this one's label (see SubtitleOption.format) —
-        // e.g. the same provider/language offered as both .srt and .vtt.
-        if (o.format != null) sb.append(o.format);
-        // Translated implies extracted (translating an embedded track needs its cues first) — show
-        // only the higher one, not both stacked.
-        if (o.translated) {
-            if (sb.length() > 0) sb.append("  ");
-            sb.append("Translated");
-        } else if (o.extracted) {
-            if (sb.length() > 0) sb.append("  ");
-            sb.append("Extracted");
-        }
-        // Independent of the chip above — syncing and translating are unrelated actions on the same
-        // subtitle, so both can show together.
-        if (o.synced) {
-            if (sb.length() > 0) sb.append("  ");
-            sb.append("Synced");
-        }
-        // TITLE is the least trustworthy match and not worth calling out — see MatchStrategy.
-        if (o.matchStrategy == MatchStrategy.HASH) {
-            if (sb.length() > 0) sb.append("  ");
-            sb.append("Hash");
-        } else if (o.matchStrategy == MatchStrategy.MEDIA_ID) {
-            if (sb.length() > 0) sb.append("  ");
-            sb.append("IMDB");
-        }
-        if (o.rating > 0) {
-            if (sb.length() > 0) sb.append("  ");
-            sb.append("★").append(String.format(Locale.ROOT, "%.1f", o.rating));
-        }
-        if (o.downloadCount > 0) {
-            if (sb.length() > 0) sb.append("  ");
-            sb.append("⬇").append(String.format(Locale.ROOT, "%,d", o.downloadCount));
-        }
-        return sb.toString();
-    }
-
-    private TextView tabItem(String text) {
-        TextView tv = new TextView(getContext());
-        tv.setText(text);
-        tv.setGravity(Gravity.CENTER);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
-        tv.setPadding(dp(12), dp(10), dp(12), dp(10));
-        return tv;
-    }
-
-    private LinearLayout.LayoutParams tabItemParams() {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        p.rightMargin = dp(4);
-        return p;
-    }
-
-    private TextView header(String text) {
-        TextView tv = new TextView(getContext());
-        tv.setText(text.toUpperCase());
-        tv.setTextColor(HEADER);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        tv.setPadding(dp(8), dp(14), dp(8), dp(6));
-        return tv;
-    }
-
-    private TextView row(String text, int color) {
-        TextView tv = new TextView(getContext());
-        tv.setText(text);
-        tv.setTextColor(color);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        tv.setPadding(dp(14), dp(10), dp(14), dp(10));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.topMargin = dp(2);
-        tv.setLayoutParams(p);
-        return tv;
+        SubsFocus.Skin to = doneFocus
+                ? new SubsFocus.Skin(SubsTheme.INK, 0, SubsTheme.ON_SECONDARY)
+                : new SubsFocus.Skin(SubsTheme.SURFACE_3, 0, SubsTheme.INK);
+        SubsFocus.apply(doneBar, doneBg, donePainted, to, Collections.singletonList(doneBar), true, 1f);
+        donePainted = to;
+        if (doneFocus) doneBar.requestFocus();
     }
 
     private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+        return SubsTheme.dp(getContext(), v);
     }
 }

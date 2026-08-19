@@ -1,12 +1,12 @@
 package com.brouken.player.subs;
 
 import android.content.Context;
-import android.graphics.Color;
-import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -15,12 +15,24 @@ import androidx.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.brouken.player.R;
+import com.brouken.player.subs.ui.SubsButton;
+import com.brouken.player.subs.ui.SubsCenteredBlock;
+import com.brouken.player.subs.ui.SubsFigurePanel;
+import com.brouken.player.subs.ui.SubsIcons;
+import com.brouken.player.subs.ui.SubsShapes;
+import com.brouken.player.subs.ui.SubsSwatch;
+import com.brouken.player.subs.ui.SubsTheme;
+
 /**
- * The Translate UI: an always-visible status line over a button row that changes shape with
- * {@link ButtonState}. All translation logic lives in the engine's {@code TranslationSession}
- * (via {@link TranslationController}); this view only renders state and turns key presses into
- * {@link Listener} calls. Mirrors {@link SyncView}'s contract (setListener / setFocused /
- * handleKey / reset).
+ * The Translate UI. Everything it shows is precomputed by {@link TranslationController} into a
+ * {@link TranslateUiState}; this view only lays it out and turns key presses into {@link Listener}
+ * calls. Mirrors {@link SyncView}'s contract (setListener / setFocused / handleKey / reset).
+ *
+ * <p>Its governing rule is subtractive: <b>only what the bar and the chips cannot say gets written
+ * down</b>. "2 in progress" is two amber segments, "1 failed" is a red one, "translating now" is the
+ * pulse — all of that used to be prose and is now simply drawn. What is left is what a picture
+ * genuinely cannot carry: how far you can watch, how far along the run is, and the money.
  */
 public class TranslateView extends FrameLayout {
 
@@ -33,80 +45,138 @@ public class TranslateView extends FrameLayout {
         void onRestoreOriginal();
         /** Finished row: drop the cached translation and pay for a fresh one. */
         void onTranslateAgain();
+        /** Partial result: re-request only the chunks that failed, keeping the ones already paid for. */
+        void onRetryMissing();
         /** ◄ past the leftmost button, or Back: move focus to the sidebar. */
         void onOpenMenu();
         /** Done button: close the whole panel. */
         void onRequestClose();
     }
 
-    private static final int COLOR_NORMAL = 0xFFFFFFFF;
-    private static final int COLOR_WARNING = 0xFFFFB74D;
-    private static final int COLOR_ERROR = 0xFFEF9A9A;
-    private static final int COLOR_DIM = 0x80FFFFFF;
-    private static final int COLOR_REASON = 0xFFB0BEC5;
-    private static final int COLOR_FOCUS_TEXT = 0xFFFFFFFF;
-    private static final int COLOR_DISABLED = 0x40FFFFFF;
-
     private static final class Btn {
         final String label;
+        final int icon;
         final Runnable action;
-        Btn(String label, Runnable action) { this.label = label; this.action = action; }
+        Btn(String label, int icon, Runnable action) {
+            this.label = label;
+            this.icon = icon;
+            this.action = action;
+        }
     }
 
-    private final TextView statusView;
+    private final LinearLayout column;
+    private final LinearLayout resultHeader;
+    private final ImageView resultRing;
+    private final TextView resultTitle;
+    private final TextView resultDetail;
+    private final LinearLayout panelRow;
+    private final List<SubsFigurePanel> panelViews = new ArrayList<>();
+    private final LinearLayout legendRow;
     private final FrameLayout chunkBarHost;
-    private final TextView reasonView;
+    private final LinearLayout pillRow;
+    private final SubsCenteredBlock centeredBlock;
     private final LinearLayout buttonRow;
 
     private Listener listener;
     private final List<Btn> buttons = new ArrayList<>();
+    private final List<SubsButton> buttonViews = new ArrayList<>();
     private int buttonIndex = 0;
     private boolean hasFocus = true;
     private ButtonState buttonState = ButtonState.IDLE;
-    /** What this screen would say on its own, and what a blocking step says over it (see setBusyStatus). */
-    private String ownStatus = "";
-    private ButtonState ownStatusState = ButtonState.IDLE;
-    @Nullable private String busyStatus;
+    private boolean canRetryMissing;
+    /** What a blocking step (reading an embedded track) says over this screen's own state. */
+    @Nullable private String busyTitle;
+    private float busyFraction = -1f;
+    @Nullable private TranslateUiState state;
 
     public TranslateView(Context context) {
         super(context);
 
-        LinearLayout topBlock = new LinearLayout(context);
-        topBlock.setOrientation(LinearLayout.VERTICAL);
-        FrameLayout.LayoutParams topBlockLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        topBlockLp.gravity = Gravity.TOP | Gravity.START;
-        addView(topBlock, topBlockLp);
+        column = new LinearLayout(context);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setPadding(dp(24), dp(20), dp(24), dp(14));
+        addView(column, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        statusView = label(16, COLOR_NORMAL);
-        statusView.setPadding(dp(24), dp(24), dp(24), dp(8));
-        topBlock.addView(statusView, new LinearLayout.LayoutParams(
+        // --- result header: a ring, a headline, a detail line ---
+        resultHeader = new LinearLayout(context);
+        resultHeader.setOrientation(LinearLayout.HORIZONTAL);
+        resultHeader.setVisibility(GONE);
+        resultRing = SubsIcons.icon(context, R.drawable.subtitle_ic_check, SubsTheme.STATUS_DONE, 22f);
+        FrameLayout ring = new FrameLayout(context);
+        ring.setBackground(SubsShapes.rounded(context, SubsTheme.SURFACE_2, 0x594FBF7A, 22f));
+        FrameLayout.LayoutParams ringIconLp = new FrameLayout.LayoutParams(dp(22), dp(22));
+        ringIconLp.gravity = Gravity.CENTER;
+        ring.addView(resultRing, ringIconLp);
+        LinearLayout.LayoutParams ringLp = new LinearLayout.LayoutParams(dp(44), dp(44));
+        ringLp.rightMargin = dp(14);
+        resultHeader.addView(ring, ringLp);
+
+        LinearLayout resultText = new LinearLayout(context);
+        resultText.setOrientation(LinearLayout.VERTICAL);
+        resultTitle = SubsTheme.headlineMd(new TextView(context));
+        resultTitle.setTextColor(SubsTheme.ON_SURFACE);
+        resultText.addView(resultTitle, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        resultDetail = SubsTheme.bodyMd(new TextView(context));
+        resultDetail.setTextColor(SubsTheme.INK_2);
+        LinearLayout.LayoutParams rdLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rdLp.topMargin = dp(4);
+        resultText.addView(resultDetail, rdLp);
+        resultHeader.addView(resultText, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams headerLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        headerLp.bottomMargin = dp(16);
+        column.addView(resultHeader, headerLp);
 
-        // Empty until TranslationController hands over its detailed chunk bar via setChunkBar() —
-        // it's constructed after this view, in CustomSubtitleController's constructor.
+        // --- figure panels ---
+        panelRow = new LinearLayout(context);
+        panelRow.setOrientation(LinearLayout.HORIZONTAL);
+        panelRow.setVisibility(GONE);
+        column.addView(panelRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // --- legend, bar, pills: one block, because they are one reading ---
+        legendRow = new LinearLayout(context);
+        legendRow.setOrientation(LinearLayout.HORIZONTAL);
+        legendRow.setVisibility(GONE);
+        LinearLayout.LayoutParams legendLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        legendLp.topMargin = dp(44);
+        column.addView(legendRow, legendLp);
+
         chunkBarHost = new FrameLayout(context);
-        LinearLayout.LayoutParams chunkBarLp = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        chunkBarLp.leftMargin = dp(24);
-        chunkBarLp.rightMargin = dp(24);
-        chunkBarLp.topMargin = dp(4);
-        topBlock.addView(chunkBarHost, chunkBarLp);
+        barLp.topMargin = dp(12);
+        column.addView(chunkBarHost, barLp);
 
-        reasonView = label(15, COLOR_REASON);
-        reasonView.setGravity(Gravity.CENTER);
-        reasonView.setPadding(dp(40), 0, dp(40), 0);
-        reasonView.setVisibility(GONE);
-        FrameLayout.LayoutParams rp = new FrameLayout.LayoutParams(
+        pillRow = new LinearLayout(context);
+        pillRow.setOrientation(LinearLayout.HORIZONTAL);
+        pillRow.setGravity(Gravity.CENTER);
+        pillRow.setVisibility(GONE);
+        LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rp.gravity = Gravity.CENTER;
-        addView(reasonView, rp);
+        pillLp.topMargin = dp(20);
+        column.addView(pillRow, pillLp);
+
+        // --- the centred block (idle / unavailable / reading), and the button row ---
+        centeredBlock = new SubsCenteredBlock(context);
+        centeredBlock.setVisibility(GONE);
+        column.addView(centeredBlock, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        View filler = new View(context);
+        column.addView(filler, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         buttonRow = new LinearLayout(context);
         buttonRow.setOrientation(LinearLayout.HORIZONTAL);
         buttonRow.setGravity(Gravity.CENTER);
-        buttonRow.setPadding(dp(12), dp(8), dp(12), dp(12));
-        addView(buttonRow, lp(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, 0));
+        column.addView(buttonRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         rebuildButtons(ButtonState.IDLE);
     }
@@ -117,59 +187,34 @@ public class TranslateView extends FrameLayout {
 
     /** Hands over {@link TranslationController#getDetailedBarView()} — called once, after this view
      *  and {@code TranslationController} both exist (see {@code CustomSubtitleController}'s constructor). */
-    public void setChunkBar(android.view.View bar) {
+    public void setChunkBar(View bar) {
         chunkBarHost.removeAllViews();
         chunkBarHost.addView(bar, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     /**
-     * A blocking step this screen is waiting on before it can do its own work — today, reading an
-     * embedded track's cues out of the container. It takes over the status line because until it
-     * finishes there is no translation state worth reporting; {@code null} gives the line back.
+     * A blocking step this screen is waiting on before it can do its own work — reading an embedded
+     * track's cues out of the container. It takes the whole screen, because until it finishes there is
+     * no translation state worth reporting; a {@code null} title gives the screen back.
      */
-    public void setBusyStatus(@Nullable String busy) {
-        this.busyStatus = busy;
-        renderStatus();
-        // No ButtonState of its own drives the row while a blocking step (embedded extraction)
-        // runs underneath this screen — without this, "Translate" stays showing (and re-presses as
-        // "start a new run") with no way to cancel what is already in flight. Falls back to
-        // ownStatusState when the blocking step ends — same pattern as setState() below.
-        ButtonState effective = busy != null ? ButtonState.RUNNING : ownStatusState;
-        if (rowKind(effective) != rowKind(buttonState)) {
-            buttonState = effective;
-            rebuildButtons(effective);
-        } else {
-            buttonState = effective;
-        }
+    public void setBusyStatus(@Nullable String title, float fraction) {
+        this.busyTitle = title;
+        this.busyFraction = fraction;
+        // The blocking step has no ButtonState of its own — without forcing RUNNING here, "Translate"
+        // stays on screen (and re-presses as "start another run") with no way to cancel what is
+        // already in flight underneath.
+        applyButtonState(title != null ? ButtonState.RUNNING
+                : (state != null ? state.buttons : ButtonState.IDLE));
+        render();
     }
 
     /** Pushes the current translation state. Buttons are only rebuilt (and focus reset) on a row change. */
-    public void setState(boolean available, @Nullable String reason, String status, ButtonState newState) {
-        this.ownStatus = status;
-        this.ownStatusState = newState;
-        renderStatus();
-
-        boolean showReason = newState == ButtonState.UNAVAILABLE;
-        reasonView.setVisibility(showReason ? VISIBLE : GONE);
-        reasonView.setText(reason != null ? reason : "");
-
-        if (rowKind(newState) != rowKind(buttonState)) {
-            buttonState = newState;
-            rebuildButtons(newState);
-        } else {
-            buttonState = newState;
-        }
-    }
-
-    private void renderStatus() {
-        if (busyStatus != null) {
-            statusView.setText(busyStatus);
-            statusView.setTextColor(COLOR_NORMAL);
-            return;
-        }
-        statusView.setText(ownStatus);
-        statusView.setTextColor(statusColor(ownStatusState));
+    public void setState(TranslateUiState next) {
+        this.state = next;
+        this.canRetryMissing = next.canRetryMissing;
+        if (busyTitle == null) applyButtonState(next.buttons);
+        render();
     }
 
     public void setFocused(boolean f) {
@@ -216,9 +261,199 @@ public class TranslateView extends FrameLayout {
         }
     }
 
-    // --- button row construction ---
+    // --- rendering ---
 
-    /** Coarse row shape: all FINISHED_* variants share one row, so they don't reset focus on switch. */
+    private void render() {
+        if (busyTitle != null) {
+            showOnlyBlock(R.drawable.subtitle_ic_subtitles, true, busyTitle,
+                    busyFraction >= 0f ? Math.round(busyFraction * 100) + "%" : null, busyFraction);
+            return;
+        }
+        TranslateUiState s = state;
+        if (s == null) {
+            showOnlyBlock(0, false, "", null, -1f);
+            return;
+        }
+        switch (s.mode) {
+            case UNAVAILABLE:
+                showOnlyBlock(R.drawable.subtitle_ic_unavailable, false, s.blockTitle, s.blockSub, -1f);
+                return;
+            case IDLE:
+                showOnlyBlock(R.drawable.subtitle_ic_translate, false, s.blockTitle, s.blockSub, -1f);
+                return;
+            default:
+                break;
+        }
+        centeredBlock.hide();
+        renderResultHeader(s);
+        renderPanels(s);
+        renderLegend(s);
+        chunkBarHost.setVisibility(s.showBar ? VISIBLE : GONE);
+        renderPills(s);
+    }
+
+    /** The three "nothing is on the bar" states share one component and differ only in their words. */
+    private void showOnlyBlock(int icon, boolean spinning, @Nullable String title, @Nullable String sub,
+                               float fraction) {
+        resultHeader.setVisibility(GONE);
+        panelRow.setVisibility(GONE);
+        legendRow.setVisibility(GONE);
+        chunkBarHost.setVisibility(GONE);
+        pillRow.setVisibility(GONE);
+        centeredBlock.show(icon, spinning, title != null ? title : "", sub, fraction);
+    }
+
+    private void renderResultHeader(TranslateUiState s) {
+        if (s.resultTitle == null) {
+            resultHeader.setVisibility(GONE);
+            return;
+        }
+        resultHeader.setVisibility(VISIBLE);
+        resultHeader.setAlpha(s.tone == TranslateUiState.Tone.MUTED ? .55f : 1f);
+        resultTitle.setText(s.resultTitle);
+        resultDetail.setText(s.resultDetail != null ? s.resultDetail : "");
+        resultDetail.setVisibility(s.resultDetail == null || s.resultDetail.isEmpty() ? GONE : VISIBLE);
+
+        int tint;
+        int icon;
+        switch (s.tone) {
+            case WARN:
+                tint = SubsTheme.TERTIARY;
+                icon = R.drawable.subtitle_ic_warning;
+                break;
+            case ERROR:
+                tint = SubsTheme.ERROR;
+                icon = R.drawable.subtitle_ic_close;
+                break;
+            case MUTED:
+                tint = SubsTheme.INK_2;
+                icon = R.drawable.subtitle_ic_close;
+                break;
+            case OK:
+            default:
+                tint = SubsTheme.STATUS_DONE;
+                icon = R.drawable.subtitle_ic_check;
+                break;
+        }
+        resultRing.setImageResource(icon);
+        SubsIcons.tint(resultRing, tint);
+        resultDetail.setTextColor(s.tone == TranslateUiState.Tone.WARN ? SubsTheme.TERTIARY
+                : s.tone == TranslateUiState.Tone.ERROR ? SubsTheme.ERROR : SubsTheme.INK_2);
+        ((View) resultRing.getParent()).setBackground(SubsShapes.rounded(getContext(),
+                SubsTheme.SURFACE_2, (tint & 0x00FFFFFF) | 0x59000000, 22f));
+    }
+
+    private void renderPanels(TranslateUiState s) {
+        if (s.panels.isEmpty()) {
+            panelRow.setVisibility(GONE);
+            return;
+        }
+        panelRow.setVisibility(VISIBLE);
+        while (panelViews.size() < s.panels.size()) {
+            SubsFigurePanel p = new SubsFigurePanel(getContext());
+            panelViews.add(p);
+            panelRow.addView(p, p.rowParams(panelRow.getChildCount() == 0));
+        }
+        for (int i = 0; i < panelViews.size(); i++) {
+            SubsFigurePanel view = panelViews.get(i);
+            if (i < s.panels.size()) {
+                TranslateUiState.Panel p = s.panels.get(i);
+                view.set(p.label, p.figure, p.sub, p.accent);
+                view.setVisibility(VISIBLE);
+            } else {
+                view.setVisibility(GONE);
+            }
+        }
+    }
+
+    private void renderLegend(TranslateUiState s) {
+        legendRow.removeAllViews();
+        if (s.legend.isEmpty()) {
+            legendRow.setVisibility(GONE);
+            return;
+        }
+        legendRow.setVisibility(VISIBLE);
+        for (TranslateUiState.Legend l : s.legend) {
+            LinearLayout item = new LinearLayout(getContext());
+            item.setOrientation(LinearLayout.HORIZONTAL);
+            item.setGravity(Gravity.CENTER_VERTICAL);
+            SubsSwatch sw = new SubsSwatch(getContext(), 9f, 2f);
+            sw.set(l.color, l.hatched);
+            LinearLayout.LayoutParams swLp = new LinearLayout.LayoutParams(dp(9), dp(9));
+            swLp.rightMargin = dp(7);
+            item.addView(sw, swLp);
+            TextView tv = SubsTheme.labelSm(new TextView(getContext()));
+            tv.setText(l.text);
+            tv.setTextColor(SubsTheme.INK_2);
+            item.addView(tv, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (legendRow.getChildCount() > 0) itemLp.leftMargin = dp(18);
+            legendRow.addView(item, itemLp);
+        }
+    }
+
+    private void renderPills(TranslateUiState s) {
+        pillRow.removeAllViews();
+        if (s.pills.isEmpty()) {
+            pillRow.setVisibility(GONE);
+            return;
+        }
+        pillRow.setVisibility(VISIBLE);
+        for (TranslateUiState.Pill p : s.pills) {
+            LinearLayout pill = new LinearLayout(getContext());
+            pill.setOrientation(LinearLayout.HORIZONTAL);
+            pill.setGravity(Gravity.CENTER_VERTICAL);
+            pill.setBackground(SubsShapes.rounded(getContext(), SubsTheme.SURFACE_3, SubsTheme.EDGE, 13f));
+            pill.setPadding(dp(12), 0, dp(12), 0);
+
+            SubsSwatch dot = new SubsSwatch(getContext(), 8f, 4f);
+            dot.set(p.color, false);
+            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(8), dp(8));
+            dotLp.rightMargin = dp(7);
+            pill.addView(dot, dotLp);
+
+            TextView tv = SubsTheme.labelSm(new TextView(getContext()));
+            tv.setText(p.text);
+            tv.setTextColor(SubsTheme.INK);
+            pill.addView(tv, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            if (p.suffix != null) {
+                TextView sfx = SubsTheme.labelSm(new TextView(getContext()));
+                sfx.setText(" · " + p.suffix);
+                sfx.setTextColor(SubsTheme.INK_2);
+                pill.addView(sfx, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(26));
+            if (pillRow.getChildCount() > 0) lp.leftMargin = dp(8);
+            pillRow.addView(pill, lp);
+        }
+    }
+
+    // --- button row ---
+
+    private void applyButtonState(ButtonState next) {
+        if (!rowKind(next).equals(rowKind(buttonState)) || rowNeedsRebuild(next)) {
+            buttonState = next;
+            rebuildButtons(next);
+        } else {
+            buttonState = next;
+        }
+    }
+
+    /** The partial row gains a button the other finished rows don't have, so it must rebuild for it. */
+    private boolean rowNeedsRebuild(ButtonState next) {
+        boolean wantsRetry = next == ButtonState.FINISHED_WARNING && canRetryMissing;
+        boolean hasRetry = !buttons.isEmpty() && buttons.get(0).action == retryMissingAction;
+        return wantsRetry != hasRetry;
+    }
+
+    /** Coarse row shape: the FINISHED_* variants share one row, so they don't reset focus on switch. */
     private static Object rowKind(ButtonState s) {
         switch (s) {
             case FINISHED_OK:
@@ -231,76 +466,68 @@ public class TranslateView extends FrameLayout {
         }
     }
 
+    private final Runnable retryMissingAction = this::retryMissing;
+
     private void rebuildButtons(ButtonState state) {
         buttons.clear();
         switch (state) {
             case IDLE:
-                buttons.add(new Btn("Translate", this::startTranslate));
-                buttons.add(new Btn("Done", this::requestClose));
+                buttons.add(new Btn("Translate", 0, this::startTranslate));
+                buttons.add(new Btn("Done", 0, this::requestClose));
                 break;
             case RUNNING:
                 // Pause first and focused: it is the reversible one. Cancel throws away the partial
                 // translation the run has already paid for, so it must not be what a stray press hits.
-                buttons.add(new Btn("Pause", this::pauseTranslate));
-                buttons.add(new Btn("Cancel", this::cancelTranslate));
-                buttons.add(new Btn("Done", this::requestClose));
+                buttons.add(new Btn("Pause", 0, this::pauseTranslate));
+                buttons.add(new Btn("Cancel", 0, this::cancelTranslate));
+                buttons.add(new Btn("Done", 0, this::requestClose));
                 break;
             case PAUSED:
-                buttons.add(new Btn("Resume", this::resumeTranslate));
-                buttons.add(new Btn("Cancel", this::cancelTranslate));
-                buttons.add(new Btn("Done", this::requestClose));
+                buttons.add(new Btn("Resume", 0, this::resumeTranslate));
+                buttons.add(new Btn("Cancel", 0, this::cancelTranslate));
+                buttons.add(new Btn("Done", 0, this::requestClose));
                 break;
             case UNAVAILABLE:
-                buttons.add(new Btn("Done", this::requestClose));
+                buttons.add(new Btn("Done", 0, this::requestClose));
+                break;
+            case FINISHED_WARNING:
+                if (canRetryMissing) {
+                    // The one documented exception to "the destructive option never starts focused":
+                    // this one destroys nothing. It re-requests only the chunks that failed, leaving
+                    // every chunk already paid for alone, and it is what the user came here to do.
+                    buttons.add(new Btn("Retry missing lines", R.drawable.subtitle_ic_retry, retryMissingAction));
+                }
+                buttons.add(new Btn("Done", 0, this::requestClose));
+                buttons.add(new Btn("Translate again", 0, this::translateAgain));
+                buttons.add(new Btn("Restore original", 0, this::restoreOriginal));
                 break;
             case FINISHED_OK:
-            case FINISHED_WARNING:
             case FINISHED_ERROR:
             case FINISHED_CANCELLED:
             default:
-                // "Restore original" is secondary and must never hold default focus — it throws
-                // away a translation the user paid for. Done comes first.
-                buttons.add(new Btn("Done", this::requestClose));
-                buttons.add(new Btn("Translate again", this::translateAgain));
-                buttons.add(new Btn("Restore original", this::restoreOriginal));
+                // "Restore original" is secondary and must never hold default focus — it throws away
+                // a translation the user paid for. Done comes first.
+                buttons.add(new Btn("Done", 0, this::requestClose));
+                buttons.add(new Btn("Translate again", 0, this::translateAgain));
+                buttons.add(new Btn("Restore original", 0, this::restoreOriginal));
                 break;
         }
         buttonIndex = 0;
 
         buttonRow.removeAllViews();
+        buttonViews.clear();
         for (Btn b : buttons) {
-            TextView tv = label(14, COLOR_FOCUS_TEXT);
-            tv.setText(b.label);
-            tv.setPadding(dp(14), dp(8), dp(14), dp(8));
-            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            blp.leftMargin = dp(4);
-            blp.rightMargin = dp(4);
-            buttonRow.addView(tv, blp);
+            SubsButton view = new SubsButton(getContext(), b.label, b.icon);
+            buttonRow.addView(view, view.rowParams());
+            buttonViews.add(view);
         }
         updateButtons();
     }
 
     private void updateButtons() {
-        for (int i = 0; i < buttonRow.getChildCount(); i++) {
-            TextView b = (TextView) buttonRow.getChildAt(i);
-            boolean focused = hasFocus && i == buttonIndex;
-            if (focused) {
-                b.setTextColor(0xFF000000);
-                b.setBackgroundColor(0xFFFFFFFF);
-            } else {
-                b.setTextColor(COLOR_FOCUS_TEXT);
-                b.setBackgroundColor(Color.TRANSPARENT);
-            }
-        }
-    }
-
-    private static int statusColor(ButtonState state) {
-        switch (state) {
-            case FINISHED_WARNING: return COLOR_WARNING;
-            case FINISHED_ERROR: return COLOR_ERROR;
-            case FINISHED_CANCELLED: return COLOR_DIM;
-            default: return COLOR_NORMAL;
+        for (int i = 0; i < buttonViews.size(); i++) {
+            buttonViews.get(i).setFocusedState(hasFocus && i == buttonIndex);
+            buttonViews.get(i).setDimmed(!hasFocus);
         }
     }
 
@@ -326,6 +553,10 @@ public class TranslateView extends FrameLayout {
         if (listener != null) listener.onTranslateAgain();
     }
 
+    private void retryMissing() {
+        if (listener != null) listener.onRetryMissing();
+    }
+
     private void restoreOriginal() {
         if (listener != null) listener.onRestoreOriginal();
     }
@@ -334,25 +565,7 @@ public class TranslateView extends FrameLayout {
         if (listener != null) listener.onRequestClose();
     }
 
-    // --- helpers ---
-
-    private TextView label(int sp, int color) {
-        TextView tv = new TextView(getContext());
-        tv.setTextColor(color);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
-        return tv;
-    }
-
-    private FrameLayout.LayoutParams lp(int gravity, int topMargin, int bottomMargin) {
-        FrameLayout.LayoutParams p = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.gravity = gravity;
-        p.topMargin = topMargin;
-        p.bottomMargin = bottomMargin;
-        return p;
-    }
-
     private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+        return SubsTheme.dp(getContext(), v);
     }
 }

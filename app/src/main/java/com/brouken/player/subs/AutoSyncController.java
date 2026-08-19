@@ -12,6 +12,10 @@ import android.widget.TextView;
 
 import androidx.annotation.Nullable;
 
+import com.brouken.player.R;
+import com.brouken.player.subs.ui.SubsPill;
+import com.brouken.player.subs.ui.SubsTheme;
+
 import java.util.Locale;
 import java.util.concurrent.ThreadFactory;
 
@@ -89,7 +93,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     private final Context context;
     private final SubtitlePanel panel;
     private final Handler mainHandler;
-    private final TextView indicator;
+    private final SubsPill indicator;
 
     // From Start placement: density-based (subtitleengine.resync.DialogueDensityProbeLocator) with the
     // old blind-fraction heuristic (FractionalProbeLocator) as fallback for subtitles with no usable
@@ -115,14 +119,8 @@ public class AutoSyncController implements AutoSyncSession.Listener {
         this.panel = panel;
         this.mainHandler = mainHandler;
 
-        indicator = new TextView(context);
-        indicator.setTextColor(Color.WHITE);
-        indicator.setShadowLayer(4f, 0f, 0f, Color.BLACK);
-        indicator.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
-        indicator.setBackgroundColor(0x99000000);
-        int pad = Math.round(8 * context.getResources().getDisplayMetrics().density);
-        indicator.setPadding(pad, Math.round(pad * 0.6f), pad, Math.round(pad * 0.6f));
-        indicator.setVisibility(View.GONE);
+        indicator = new SubsPill(context, R.drawable.subtitle_ic_sync,
+                SubsTheme.STATUS_TRANSLATING, false);
     }
 
     /**
@@ -150,10 +148,32 @@ public class AutoSyncController implements AutoSyncSession.Listener {
         }
         if (indicator.getVisibility() != View.VISIBLE) indicator.setVisibility(View.VISIBLE);
 
-        String text = showTerminal
-                ? indicatorTerminalText
-                : "Auto-sync: " + (lastProgress != null ? formatRunning(lastProgress) : "Starting…");
-        if (!text.contentEquals(indicator.getText())) indicator.setText(text);
+        if (showTerminal) {
+            indicator.set(null, indicatorTerminalText, null);
+            indicator.setIconTint(SubsTheme.INK_2);
+            return;
+        }
+        indicator.setIconTint(SubsTheme.STATUS_TRANSLATING);
+        float fraction = lastProgress != null
+                ? (float) Math.max(0.0, Math.min(1.0, lastProgress.getFraction())) : 0f;
+        indicator.set("SYNCING AUDIO", lastProgress != null ? formatRunning(lastProgress) : "Starting…",
+                phaseCells(fraction));
+    }
+
+    /**
+     * The phase's own progress as a strip of cells. Auto-sync has no chunks to colour, so the strip
+     * simply fills left to right — same shape as the translation pill's, which is the point: both
+     * say "something is running and this is how far it has got" without needing a legend.
+     */
+    private static int[] phaseCells(float fraction) {
+        int n = 6;
+        int[] cells = new int[n];
+        int filled = Math.round(fraction * n);
+        for (int i = 0; i < n; i++) {
+            cells[i] = i < filled ? SubsTheme.STATUS_DONE
+                    : (i == filled ? SubsTheme.STATUS_TRANSLATING : SubsTheme.STATUS_PENDING);
+        }
+        return cells;
     }
 
     /** Sets the 3s post-run flash text for DONE/ERROR; clears it for RUNNING/CANCELLED/IDLE. */
@@ -321,7 +341,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
 
         switch (p.getStatus()) {
             case RUNNING:
-                return AutoSyncUiState.running(formatRunning(p));
+                return AutoSyncUiState.running(formatRunning(p), runVerb(p), runFraction(p));
             case DONE:
                 ResyncResult result = p.getResult();
                 return result != null
@@ -340,15 +360,22 @@ public class AutoSyncController implements AutoSyncSession.Listener {
 
     private static String formatRunning(AutoSyncProgress p) {
         if (p.getPhase() == null) return "Starting…";
-        int pct = (int) Math.round(Math.max(0.0, Math.min(1.0, p.getFraction())) * 100);
-        String verb;
+        return runVerb(p) + "… " + Math.round(runFraction(p) * 100) + "%";
+    }
+
+    /** The phase as a headline on its own — see {@link AutoSyncUiState#runTitle}. */
+    private static String runVerb(AutoSyncProgress p) {
+        if (p.getPhase() == null) return "Starting";
         switch (p.getPhase()) {
-            case EXTRACTING: verb = "Extracting audio"; break;
-            case ANALYZING:  verb = "Analyzing speech"; break;
-            case MATCHING:   verb = "Matching subtitles"; break;
-            default:         verb = "Working"; break;
+            case EXTRACTING: return "Extracting audio";
+            case ANALYZING:  return "Analyzing speech";
+            case MATCHING:   return "Matching subtitles";
+            default:         return "Working";
         }
-        return verb + "… " + pct + "%";
+    }
+
+    private static float runFraction(AutoSyncProgress p) {
+        return (float) Math.max(0.0, Math.min(1.0, p.getFraction()));
     }
 
     private static String formatDone(ResyncResult result) {

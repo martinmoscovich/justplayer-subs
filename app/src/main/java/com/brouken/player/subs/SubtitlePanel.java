@@ -1,16 +1,21 @@
 package com.brouken.player.subs;
 
 import android.content.Context;
-import android.graphics.Color;
-import android.util.TypedValue;
-import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.TextView;
+
+import androidx.annotation.Nullable;
 
 import java.util.List;
+
+import com.brouken.player.R;
+import com.brouken.player.subs.ui.SubsBack;
+import com.brouken.player.subs.ui.SubsSelectedBlock;
+import com.brouken.player.subs.ui.SubsSidebarItem;
+import com.brouken.player.subs.ui.SubsTheme;
 
 import subtitleengine.sync.ManualSyncSession;
 
@@ -43,6 +48,8 @@ public class SubtitlePanel extends FrameLayout
         void onResumeTranslate();
         void onRestoreOriginal();
         void onTranslateAgain();
+        /** Partial result: re-request only the chunks that failed, keeping what was already paid for. */
+        void onRetryMissing();
         void onStartAutoSync(boolean fromHere);
         void onCancelAutoSync();
         /** The Sync screen just stopped being what's shown — either another screen took over, or the
@@ -57,12 +64,18 @@ public class SubtitlePanel extends FrameLayout
     private static final Screen[] SCREENS = Screen.values(); // sidebar index 0..2 = content screens
     private static final int SIDEBAR_SETTINGS = 3;
 
-    private final LinearLayout sidebar;
-    private final TextView[] sidebarItems;
+    private final SubsSidebarItem[] sidebarItems;
+    private final SubsSelectedBlock selectedBlock;
     private final SubtitleSelectorView selector;
     private final SyncView syncView;
     private final TranslateView translateView;
     private boolean translateAvailable = true;
+    /** Mirrors what {@link #setOptions} last saw, so the SELECTED block can be rebuilt from either
+     *  that or {@link #setExtractionStatus} without either caller having to know about the other. */
+    @Nullable private SubtitleOption selectedOption;
+    private boolean extracting;
+    /** Non-null only while the panel is open — see {@link SubsBack}. */
+    @Nullable private Object backCallback;
 
     private Callbacks callbacks;
     private Screen screen = Screen.SELECT;
@@ -71,7 +84,7 @@ public class SubtitlePanel extends FrameLayout
 
     public SubtitlePanel(Context context) {
         super(context);
-        setBackgroundColor(0xB3000000);
+        setBackgroundColor(SubsTheme.VEIL);
         setVisibility(GONE);
         setClickable(true);
 
@@ -80,16 +93,34 @@ public class SubtitlePanel extends FrameLayout
         addView(row, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        sidebar = new LinearLayout(context);
+        LinearLayout sidebar = new LinearLayout(context);
         sidebar.setOrientation(LinearLayout.VERTICAL);
-        sidebar.setBackgroundColor(0x22FFFFFF);
-        sidebar.setPadding(dp(8), dp(24), dp(8), dp(24));
-        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(dp(180), ViewGroup.LayoutParams.MATCH_PARENT);
-        row.addView(sidebar, sbLp);
+        sidebar.setBackgroundColor(SubsTheme.PANEL);
+        sidebar.setPadding(dp(12), dp(28), dp(12), dp(20));
+        row.addView(sidebar, new LinearLayout.LayoutParams(
+                dp(Math.round(SubsTheme.SIDEBAR_W_DP)), ViewGroup.LayoutParams.MATCH_PARENT));
 
-        sidebarItems = new TextView[]{
-                sidebarItem("Subtitles"), sidebarItem("Sync"), sidebarItem("Translate"), sidebarItem("⚙ Settings") };
-        for (TextView it : sidebarItems) sidebar.addView(it);
+        sidebarItems = new SubsSidebarItem[]{
+                new SubsSidebarItem(context, "Subtitles", R.drawable.subtitle_ic_subtitles),
+                new SubsSidebarItem(context, "Sync", R.drawable.subtitle_ic_sync),
+                new SubsSidebarItem(context, "Translate", R.drawable.subtitle_ic_translate),
+                new SubsSidebarItem(context, "Settings", R.drawable.subtitle_ic_settings) };
+        for (SubsSidebarItem it : sidebarItems) sidebar.addView(it, it.navParams());
+
+        // Pushes the SELECTED block to the foot of the sidebar: it is an anchor, and one that floated
+        // up with the nav would move every time the panel gained a screen.
+        View spacer = new View(context);
+        sidebar.addView(spacer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        selectedBlock = new SubsSelectedBlock(context);
+        sidebar.addView(selectedBlock, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // The sidebar's right edge — a hairline, not a gap, so the two zones read as one surface.
+        View edge = new View(context);
+        edge.setBackgroundColor(SubsTheme.EDGE);
+        row.addView(edge, new LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT));
 
         FrameLayout content = new FrameLayout(context);
         LinearLayout.LayoutParams cLp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f);
@@ -117,6 +148,31 @@ public class SubtitlePanel extends FrameLayout
 
     public void setOptions(List<SubtitleOption> options, String selectedId, boolean loadingMore) {
         selector.setOptions(options, selectedId, loadingMore);
+        selectedOption = null;
+        if (options != null && selectedId != null) {
+            for (SubtitleOption o : options) {
+                if (selectedId.equals(o.id)) { selectedOption = o; break; }
+            }
+        }
+        renderSelectedBlock();
+    }
+
+    /** The SELECTED block is derived, never pushed: everything it says is already in the option. */
+    private void renderSelectedBlock() {
+        SubtitleOption o = selectedOption;
+        if (o == null) {
+            selectedBlock.set(null, null, SubsSelectedBlock.Status.READY);
+            return;
+        }
+        boolean extractingThis = extracting && o.source == SubtitleOption.Source.EMBEDDED;
+        String flag = LanguageFlags.flagFor(o.language);
+        // Same name the row shows: with a flag in front, the language code in the label is said twice.
+        selectedBlock.set(flag, SubtitleSelectorView.titleFor(o, flag != null), SubsSelectedBlock.pick(
+                o.state == SubtitleOption.State.ERROR,
+                o.state == SubtitleOption.State.LOADING,
+                extractingThis,
+                o.translated,
+                o.fromCache));
     }
 
     /** Binds the engine sync session (null = nothing syncable) into the sync screen. */
@@ -125,9 +181,9 @@ public class SubtitlePanel extends FrameLayout
     }
 
     /** Pushes the current translation state into the Translate screen and sidebar. */
-    public void setTranslateState(boolean available, String reason, String status, ButtonState buttons) {
+    public void setTranslateState(boolean available, TranslateUiState state) {
         translateAvailable = available;
-        translateView.setState(available, reason, status, buttons);
+        translateView.setState(state);
         styleSidebar();
     }
 
@@ -138,11 +194,13 @@ public class SubtitlePanel extends FrameLayout
 
     /**
      * Shows how far the read of an embedded track has got, on whichever screen asked for it. Passing
-     * {@code null} clears it — the screens then go back to reporting their own state.
+     * a {@code null} title clears it — the screens then go back to reporting their own state.
      */
-    public void setExtractionStatus(String status) {
-        translateView.setBusyStatus(status);
-        syncView.setBusyStatus(status);
+    public void setExtractionStatus(@Nullable String title, float fraction) {
+        translateView.setBusyStatus(title, fraction);
+        syncView.setBusyStatus(title, fraction);
+        extracting = title != null;
+        renderSelectedBlock();
     }
 
     /** Pushes formatted auto-sync state (see {@link AutoSyncController}) into the Sync screen. */
@@ -165,6 +223,7 @@ public class SubtitlePanel extends FrameLayout
 
     private void openOn(Screen target) {
         setVisibility(VISIBLE);
+        claimBack();
         changeScreen(target);
         sidebarIndex = target.ordinal();
         syncView.reset();
@@ -175,7 +234,42 @@ public class SubtitlePanel extends FrameLayout
 
     public void close() {
         if (screen == Screen.SYNC && callbacks != null) callbacks.onLeavingSync();
+        releaseBack();
         setVisibility(GONE);
+    }
+
+    /**
+     * On API 33+ Back never arrives as a key event (the manifest opts into
+     * {@code enableOnBackInvokedCallback}), so every {@code KEYCODE_BACK} branch below is dead there
+     * and Back would finish the Activity straight from an open panel. Claiming the dispatcher while
+     * the panel is up routes it back to exactly the same handlers.
+     */
+    private void claimBack() {
+        if (backCallback != null) return;
+        backCallback = SubsBack.claim(this, this::onBackInvoked);
+    }
+
+    private void releaseBack() {
+        SubsBack.release(this, backCallback);
+        backCallback = null;
+    }
+
+    /** The same path a {@code KEYCODE_BACK} press takes, so the two routes can never disagree. */
+    private void onBackInvoked() {
+        handleKey(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK));
+    }
+
+    /** The dispatcher is only reachable once attached, so a panel opened before that claims here. */
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (isOpen()) claimBack();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        releaseBack();
+        super.onDetachedFromWindow();
     }
 
     /** The one place {@link #screen} is allowed to change — so leaving Sync is never missed
@@ -298,6 +392,7 @@ public class SubtitlePanel extends FrameLayout
     @Override public void onResumeTranslate() { if (callbacks != null) callbacks.onResumeTranslate(); }
     @Override public void onRestoreOriginal() { if (callbacks != null) callbacks.onRestoreOriginal(); }
     @Override public void onTranslateAgain() { if (callbacks != null) callbacks.onTranslateAgain(); }
+    @Override public void onRetryMissing() { if (callbacks != null) callbacks.onRetryMissing(); }
 
     // --- SyncView.Listener (auto-sync) ---
 
@@ -309,38 +404,14 @@ public class SubtitlePanel extends FrameLayout
     private void styleSidebar() {
         int activeScreen = screen.ordinal();
         for (int i = 0; i < sidebarItems.length; i++) {
-            TextView it = sidebarItems[i];
             boolean focused = focus == Focus.SIDEBAR && i == sidebarIndex;
             // Dimmed but still selectable — see setTranslateState(); a dead item that silently
             // ignores OK would be worse UX than just explaining why on the screen itself.
             boolean dimmedUnavailable = i == Screen.TRANSLATE.ordinal() && !translateAvailable;
-            if (focused) {
-                it.setTextColor(0xFF000000);
-                it.setBackgroundColor(0xFFFFFFFF);
-            } else if (dimmedUnavailable) {
-                it.setTextColor(0xFF4A5A63);
-                it.setBackgroundColor(Color.TRANSPARENT);
-            } else if (i == activeScreen) {
-                it.setTextColor(0xFF4DD0E1);
-                it.setBackgroundColor(0x334DD0E1);
-            } else {
-                it.setTextColor(0xFFB0BEC5);
-                it.setBackgroundColor(Color.TRANSPARENT);
-            }
+            // Animate only while the panel is up: the first paint after open() is a new screen,
+            // not a move, and 130ms of colour ramp there reads as the panel loading slowly.
+            sidebarItems[i].setState(focused, i == activeScreen, dimmedUnavailable, isOpen());
         }
-    }
-
-    private TextView sidebarItem(String text) {
-        TextView tv = new TextView(getContext());
-        tv.setText(text);
-        tv.setTextColor(0xFFB0BEC5);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        tv.setPadding(dp(16), dp(14), dp(16), dp(14));
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.bottomMargin = dp(4);
-        tv.setLayoutParams(p);
-        return tv;
     }
 
     private static boolean isNavKey(int keyCode) {

@@ -2,6 +2,8 @@ package com.brouken.player.subs;
 
 import androidx.annotation.Nullable;
 
+import com.brouken.player.subs.ui.SubsTheme;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -277,6 +279,42 @@ final class ChunkTimelineTracker {
 
     private static float clamp01(float v) {
         return Math.max(0f, Math.min(1f, v));
+    }
+
+    /**
+     * The model reduced to at most {@code maxCells} equal-width colour cells, for the over-video
+     * pill's mini bar. Each cell takes the colour of whatever segment covers its midpoint, so a
+     * single failed chunk in the middle of a long run still shows up as one red cell instead of
+     * being averaged away — which is the only thing that strip is there to say.
+     */
+    static int[] miniCells(ChunkProgressBarView.Model model, int maxCells) {
+        int n = Math.min(maxCells, model.segments.size());
+        if (n <= 0 || model.totalDurationMs <= 0) return new int[0];
+        int[] out = new int[n];
+        for (int i = 0; i < n; i++) {
+            long at = (long) ((i + 0.5) / n * model.totalDurationMs);
+            out[i] = SubsTheme.STATUS_PENDING;
+            for (ChunkProgressBarView.Segment seg : model.segments) {
+                if (at >= seg.startMs && at < seg.endMs) {
+                    out[i] = colorFor(seg.state);
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
+    private static int colorFor(ChunkProgressBarView.SegmentState state) {
+        switch (state) {
+            case DONE: return SubsTheme.STATUS_DONE;
+            case TRANSLATING: return SubsTheme.STATUS_TRANSLATING;
+            case FAILED: return SubsTheme.STATUS_FAILED;
+            case CLOSED: return SubsTheme.STATUS_CLOSED;
+            case CLOSING:
+            case EXTRACTING: return SubsTheme.STATUS_EXTRACTING;
+            case PENDING:
+            default: return SubsTheme.STATUS_PENDING;
+        }
     }
 
     /** Overall completion, 0-100 — the sum of DONE segment durations over the whole timeline, not a

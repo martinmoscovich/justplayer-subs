@@ -29,6 +29,12 @@ Separated by concern (selection vs sync), each with its own UI + controller:
 | File | Purpose |
 |---|---|
 | `gradle/libs.versions.toml` | Version catalog copied from the `player/` root so the included engine module resolves its `libs.*` accessors inside the fork build. |
+| `app/src/main/res/font/subtitle_inter_{regular,medium,semibold,bold}.ttf` | Inter (SIL OFL), the subtitle panel'''s typeface. Loaded only from `com.brouken.player.subs`; the app theme is untouched. |
+| `app/src/main/res/drawable/subtitle_ic_*.xml` | The panel'''s 21 `VectorDrawable` icons, drawn in white and tinted at runtime. |
+
+`res/` is a **global namespace shared with upstream**, so everything added there carries a
+`subtitle_` prefix and nothing under `res/values` (or the theme) is edited. That keeps a rebase from
+having to resolve a single resource conflict.
 
 <!-- Append new upstream modifications above as the integration proceeds (manifest intent-filter,
      PlayerActivity hooks for the subtitle overlay, etc.). -->
