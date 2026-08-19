@@ -14,26 +14,38 @@ import androidx.annotation.Nullable;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Consumer;
 
 import okhttp3.OkHttpClient;
 import subtitleengine.core.model.SubtitleFile;
+import subtitleengine.pipeline.EntrySource;
+import subtitleengine.pipeline.SubtitlePipelineSession;
 import subtitleengine.translation.ChunkProgress;
+import subtitleengine.translation.ChunkingConfig;
 import subtitleengine.translation.GeminiClient;
 import subtitleengine.translation.OpenRouterClient;
+import subtitleengine.translation.RunStatus;
 import subtitleengine.translation.SubtitleTranslator;
 import subtitleengine.translation.TranslationClient;
 import subtitleengine.translation.TranslationProgress;
-import subtitleengine.translation.TranslationSession;
 import subtitleengine.translation.TranslationStats;
 
 /**
- * Thin adapter between Android and the engine's {@link TranslationSession}: builds the LLM client
- * from settings, resolves the target language, formats all user-facing strings, and pushes state
- * into {@link SubtitleSyncController} / {@link SubtitlePanel}. Mirrors {@link SubtitleSyncController}
- * / {@link SubtitleSelectionController} in shape — the merge loop, worker thread and state machine
- * all live in the engine session; this class only translates engine events into Android calls.
+ * Thin adapter between Android and the engine's {@link SubtitlePipelineSession}: builds the LLM
+ * client from settings, resolves the target language, formats all user-facing strings, and pushes
+ * state into {@link SubtitleSyncController} / {@link SubtitlePanel}. Mirrors
+ * {@link SubtitleSyncController} / {@link SubtitleSelectionController} in shape — the merge loop,
+ * worker thread and state machine all live in the engine session; this class only translates engine
+ * events into Android calls.
+ *
+ * <p>For an embedded track that hasn't been extracted yet, {@link #start} asks
+ * {@link EmbeddedSubtitleController#entrySourceFor} for a source that streams cues out of the
+ * container while chunks translate as they close — instead of the old "wait for the whole container
+ * read, then translate" two-step. Every other source (external, provider, an embedded track already
+ * fully cached) already has its {@link SubtitleFile}, so it behaves exactly as before: several
+ * chunks translating at once, priority pass from the current playback position.
  */
-public class TranslationController implements TranslationSession.Listener {
+public class TranslationController implements SubtitlePipelineSession.Listener {
 
     private static final String TAG = "TranslationController";
 
@@ -41,30 +53,41 @@ public class TranslationController implements TranslationSession.Listener {
     private final SubtitleSyncController sync;
     private final SubtitlePanel panel;
     private final Runnable renderOverlay;
-    private final TranslationSession session;
+    private final EmbeddedSubtitleController embedded;
+    private final Consumer<SubtitleFile> promoteToOverlay;
+    private final SubtitlePipelineSession session;
     private final TextView indicator;
 
     private static final long TERMINAL_FLASH_MS = 3000;
 
     @Nullable private SubtitleFile source;
-    /** The selection has no cues yet but they can be read out of the container on demand. */
-    private boolean extractableSource;
+    @Nullable private String movieTitle;
+    /** The current selection, so {@link #start} can ask {@link #embedded} for an entry source when
+     *  it's an embedded track with no {@link #source} of its own yet. */
+    @Nullable private SubtitleOption selectedOption;
+    /** True for the run currently starting/running when it began from {@link #embedded}'s entry
+     *  source rather than an already-known {@link #source} — see {@link #onSubtitleUpdated}. */
+    private boolean pendingSourcePromotion;
     @Nullable private TranslationProgress lastProgress;
     private boolean toastedForRun; // one Toast per run, not per chunk
     @Nullable private String indicatorTerminalText; // non-null while the post-run flash is live
     private long indicatorTerminalUntilMs;           // System.currentTimeMillis() deadline for the flash
 
     public TranslationController(Context context, SubtitleSyncController sync, SubtitlePanel panel,
-                                 Handler mainHandler, Runnable renderOverlay) {
+                                 EmbeddedSubtitleController embedded, Handler mainHandler,
+                                 Runnable renderOverlay, Consumer<SubtitleFile> promoteToOverlay) {
         this.context = context;
         this.sync = sync;
         this.panel = panel;
+        this.embedded = embedded;
         this.renderOverlay = renderOverlay;
+        this.promoteToOverlay = promoteToOverlay;
         // The engine's pricing cache defaults to ~/.subtitle-engine, which doesn't resolve to
         // anything writable on Android (see LESSONS.md) — point it at real app storage instead.
         SubtitleTranslator.setPricingCacheDir(context.getFilesDir());
         SubtitleTranslator translator = new SubtitleTranslator(buildClient(context));
-        this.session = new TranslationSession(translator, mainHandler::post, this);
+        this.session = new SubtitlePipelineSession(translator, ChunkingConfig.defaults(), 3,
+                mainHandler::post, this);
 
         indicator = new TextView(context);
         indicator.setTextColor(Color.WHITE);
@@ -91,7 +114,7 @@ public class TranslationController implements TranslationSession.Listener {
             indicatorTerminalText = null; // flash window elapsed
         }
 
-        boolean showRunning = session.status() == TranslationSession.Status.RUNNING;
+        boolean showRunning = session.status() == RunStatus.RUNNING;
         boolean showTerminal = indicatorTerminalText != null;
 
         if (panelOpen || (!showRunning && !showTerminal)) {
@@ -105,9 +128,13 @@ public class TranslationController implements TranslationSession.Listener {
             text = indicatorTerminalText;
         } else {
             TranslationProgress p = lastProgress;
-            text = (p != null)
-                    ? "Translating " + p.getCompletedChunks() + "/" + p.getTotalChunks() + formatCostSoFar(p)
-                    : "Translating…";
+            if (p != null && p.isStreaming()) {
+                text = streamingSummary(p);
+            } else {
+                text = (p != null)
+                        ? "Translating " + p.getCompletedChunks() + "/" + p.getTotalChunks() + formatCostSoFar(p)
+                        : "Translating…";
+            }
         }
         if (!text.contentEquals(indicator.getText())) indicator.setText(text);
     }
@@ -150,9 +177,12 @@ public class TranslationController implements TranslationSession.Listener {
         start(positionMs);
     }
 
-    /** Sets/replaces the translatable source. {@code null} when nothing is loaded or an embedded track is active. */
+    /** Sets/replaces an already fully-known translatable source (external, provider, a fully-cached
+     *  embedded track). {@code null} when nothing is loaded — an embedded track with no
+     *  {@link SubtitleFile} of its own yet goes through {@link #setSelectedOption} instead. */
     public void setSource(@Nullable SubtitleFile file, @Nullable String movieTitle) {
         this.source = file;
+        this.movieTitle = movieTitle;
         this.toastedForRun = false;
         this.lastProgress = null;
         this.indicatorTerminalText = null;
@@ -161,14 +191,39 @@ public class TranslationController implements TranslationSession.Listener {
     }
 
     /**
+     * The current selection and its title — kept so {@link #start} can resolve an
+     * {@link EntrySource} for an embedded track that has no {@link #source} of its own yet. Called
+     * on every selection change, regardless of source kind (mirrors
+     * {@code CustomSubtitleController.needsExtraction()}'s checks, reused here via
+     * {@link #isExtractableSelected()} so the two can't drift).
+     */
+    public void setSelectedOption(@Nullable SubtitleOption option, @Nullable String movieTitle) {
+        this.selectedOption = option;
+        this.movieTitle = movieTitle;
+        pushState();
+    }
+
+    /**
      * @param positionMs current playback position — entries at/after it are prioritized so the
-     *                   user can keep watching without gaps as soon as possible.
+     *                   user can keep watching without gaps as soon as possible. Only affects an
+     *                   already fully-known source (see {@link SubtitlePipelineSession}'s class
+     *                   javadoc) — ignored for a streaming embedded extraction.
      */
     public void start(long positionMs) {
         if (!canTranslate()) return;
         toastedForRun = false;
         lastProgress = null;
         indicatorTerminalText = null;
+
+        if (source == null && isExtractableSelected()) {
+            EntrySource entrySource = embedded.entrySourceFor(selectedOption);
+            if (entrySource == null) return; // isExtractableSelected() said yes but embedded disagreed
+            pendingSourcePromotion = true;
+            session.setSource(entrySource, selectedOption.language, movieTitle);
+        } else {
+            pendingSourcePromotion = false;
+        }
+
         session.start(targetLanguage(), positionMs);
         pushState();
     }
@@ -176,7 +231,7 @@ public class TranslationController implements TranslationSession.Listener {
     /**
      * If a complete translation is already cached for the current source and target language, applies
      * it synchronously (no worker thread, no network) and returns it — {@code null} if none, in which
-     * case the caller should fall back to {@link #start}. See {@link TranslationSession#loadCompleteFromCache}
+     * case the caller should fall back to {@link #start}. See {@link SubtitlePipelineSession#loadCompleteFromCache}
      * for why this exists as a separate call instead of just always using {@link #start}.
      */
     @Nullable
@@ -218,27 +273,41 @@ public class TranslationController implements TranslationSession.Listener {
     }
 
     /**
-     * Whether the current selection could yield cues on demand (an embedded text track). Without
-     * this the screen is a dead end: it reports "no source" precisely for the tracks whose source is
-     * one extraction away, and the button that would start that extraction is the one UNAVAILABLE
-     * hides.
+     * Whether the current selection could yield cues on demand (an embedded text track). Mirrors
+     * {@code CustomSubtitleController.needsExtraction()}'s exact checks — kept here too so
+     * {@link #reasonUnavailable} and {@link #start} share one definition instead of trusting a
+     * boolean passed in from outside that could drift from what {@link #embedded} actually decides.
      */
-    public void setExtractableSource(boolean extractable) {
-        if (this.extractableSource == extractable) return;
-        this.extractableSource = extractable;
-        pushState();
+    private boolean isExtractableSelected() {
+        return selectedOption != null
+                && selectedOption.source == SubtitleOption.Source.EMBEDDED
+                && !selectedOption.imageFormat
+                && selectedOption.trackState == SubtitleOption.TrackState.NATIVE;
     }
 
     @Nullable
     private String reasonUnavailable() {
         if (!hasApiKey()) return "No AI API key — set one in Settings > Translation";
-        if (source == null) {
-            // Available on purpose: pressing Translate reads the track first, then translates it.
-            return extractableSource ? null : "Nothing to translate — pick a subtitle first";
-        }
         String target = targetLanguage();
+        if (source == null) {
+            if (!isExtractableSelected()) return "Nothing to translate — pick a subtitle first";
+            // Available on purpose: pressing Translate reads the track first, then translates it —
+            // but only if the track's own declared language actually needs translating. Without this
+            // check, a not-yet-extracted embedded track always looked available regardless of its
+            // language, even when it already matches the target (found live: a Spanish embedded
+            // track with target=es showed as translatable and then had nothing to actually do).
+            String optionLang = selectedOption.language;
+            if (optionLang != null && primary(optionLang).equals(primary(target))) {
+                return "Already in " + target;
+            }
+            return null;
+        }
         if (!session.canTranslate(target)) return "Already in " + target;
         return null;
+    }
+
+    private static String primary(String lang) {
+        return lang.split("-")[0];
     }
 
     private boolean hasApiKey() {
@@ -265,13 +334,25 @@ public class TranslationController implements TranslationSession.Listener {
         return new OpenRouterClient(apiKey, model, http);
     }
 
-    // --- TranslationSession.Listener ---
+    // --- SubtitlePipelineSession.Listener ---
 
     @Override
     public void onSubtitleUpdated(SubtitleFile current) {
-        sync.updateSubtitle(current);
-        panel.setSyncSession(sync.getSession());
-        if (renderOverlay != null) renderOverlay.run();
+        if (pendingSourcePromotion) {
+            pendingSourcePromotion = false;
+            source = current;
+            // The very first entries have streamed in — hand the screen over to them: Media3's native
+            // track goes off and our overlay activates on this file, the same two steps (composed
+            // there, not duplicated here) an on-demand extraction for Sync/Auto-sync already does.
+            promoteToOverlay.accept(current);
+        } else {
+            // Every call after promotion just swaps the cue text in an already-active sync session —
+            // promoteToOverlay() (via CustomSubtitleController#activateOverlay) already did the
+            // one-time activation above.
+            sync.updateSubtitle(current);
+            panel.setSyncSession(sync.getSession());
+            if (renderOverlay != null) renderOverlay.run();
+        }
     }
 
     @Override
@@ -303,11 +384,11 @@ public class TranslationController implements TranslationSession.Listener {
 
     private void maybeToast(TranslationProgress p) {
         if (toastedForRun) return;
-        if (p.getStatus() == TranslationSession.Status.ERROR) {
+        if (p.getStatus() == RunStatus.ERROR) {
             toastedForRun = true;
             String msg = p.getErrorMessage() != null ? p.getErrorMessage() : "unknown error";
             Toast.makeText(context, "Translation failed: " + msg, Toast.LENGTH_LONG).show();
-        } else if (p.getStatus() == TranslationSession.Status.DONE && p.getUntranslatedEntries() > 0) {
+        } else if (p.getStatus() == RunStatus.DONE && p.getUntranslatedEntries() > 0) {
             toastedForRun = true;
             Toast.makeText(context, "Translated with warnings — " + p.getUntranslatedEntries()
                     + " lines kept in the original language", Toast.LENGTH_LONG).show();
@@ -317,7 +398,7 @@ public class TranslationController implements TranslationSession.Listener {
     // --- panel state push ---
 
     private void pushState() {
-        TranslationSession.Status status = session.status();
+        RunStatus status = session.status();
         boolean available = canTranslate();
         String reason = reasonUnavailable();
         String statusText = formatStatus(status, lastProgress);
@@ -325,7 +406,7 @@ public class TranslationController implements TranslationSession.Listener {
         panel.setTranslateState(available, reason, statusText, buttons);
     }
 
-    private static ButtonState buttonStateFor(boolean available, TranslationSession.Status status,
+    private static ButtonState buttonStateFor(boolean available, RunStatus status,
                                               @Nullable TranslationProgress p) {
         switch (status) {
             case RUNNING:
@@ -343,15 +424,22 @@ public class TranslationController implements TranslationSession.Listener {
         }
     }
 
-    private String formatStatus(TranslationSession.Status status, @Nullable TranslationProgress p) {
+    private String formatStatus(RunStatus status, @Nullable TranslationProgress p) {
         switch (status) {
             case RUNNING:
                 if (p == null) return "Translating…";
+                if (p.isStreaming()) {
+                    StringBuilder streaming = new StringBuilder(streamingSummary(p));
+                    streaming.append(formatCostSoFar(p));
+                    appendActiveChunks(streaming, p);
+                    return streaming.toString();
+                }
                 StringBuilder running = new StringBuilder("Translating… ")
                         .append(p.getCompletedChunks()).append("/").append(p.getTotalChunks());
                 int inProgress = Math.max(0, p.getStartedChunks() - p.getCompletedChunks());
                 if (inProgress > 0) running.append(" · ").append(inProgress).append(" in progress");
                 if (p.getFailedChunks() > 0) running.append(" · ").append(p.getFailedChunks()).append(" failed");
+                if (p.isLastChunkFailed()) running.append(" · ⚠ last chunk failed to translate");
                 if (p.getReadyUntilMs() > 0) running.append(" · ready up to ").append(formatDuration(p.getReadyUntilMs()));
                 running.append(formatCostSoFar(p));
                 appendActiveChunks(running, p);
@@ -367,6 +455,44 @@ public class TranslationController implements TranslationSession.Listener {
             default:
                 return "";
         }
+    }
+
+    /**
+     * The narrative a streaming run (an embedded track being extracted and translated at once)
+     * actually needs to answer for the user: can I start watching, and for how long, and if not yet,
+     * how much longer. Three independent facts, all can be true at once — extraction of what comes
+     * after the active chunk never stops just because that chunk is translating — so they're joined,
+     * not chosen between:
+     * <ul>
+     *   <li>{@link TranslationProgress#getReadyUntilMs()} &gt; 0 — "watchable up to" so far.</li>
+     *   <li>{@link TranslationProgress#getActiveChunks()} non-empty — a chunk is translating right now.</li>
+     *   <li>{@link TranslationProgress#getSourceFraction()} &lt; 1.0 — still extracting, with
+     *       {@link TranslationProgress#getEtaMs()} (once measurable) saying how much longer until the
+     *       chunk currently being built closes.</li>
+     *   <li>{@link TranslationProgress#isLastChunkFailed()} — the chunk just before this one never made
+     *       it, so the wait for it wasn't for nothing but the content it covered is still untranslated.
+     *       Without this the run silently goes back to "extracting" and looks like nothing happened.</li>
+     * </ul>
+     */
+    private static String streamingSummary(TranslationProgress p) {
+        StringBuilder sb = new StringBuilder();
+        if (p.getReadyUntilMs() > 0) {
+            sb.append("Watchable up to ").append(formatDuration(p.getReadyUntilMs()));
+        }
+        if (!p.getActiveChunks().isEmpty()) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append("translating now");
+        }
+        if (p.getSourceFraction() < 1.0) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append("extracting");
+            if (p.getEtaMs() >= 0) sb.append(" — next chunk in ~").append(formatDuration(p.getEtaMs()));
+        }
+        if (p.isLastChunkFailed()) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append("⚠ last chunk failed to translate");
+        }
+        return sb.length() > 0 ? sb.toString() : "Preparing subtitles…";
     }
 
     /**

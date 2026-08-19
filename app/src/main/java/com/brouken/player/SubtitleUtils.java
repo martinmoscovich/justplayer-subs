@@ -275,7 +275,16 @@ class SubtitleUtils {
                 .setMimeType(subtitleMime)
                 .setLanguage(subtitleLanguage)
                 .setRoleFlags(C.ROLE_FLAG_SUBTITLE)
-                .setLabel(subtitleName);
+                .setLabel(subtitleName)
+                // Every caller of this factory attaches an *external* subtitle to Media3 (sideloaded,
+                // launcher-provided, or auto-searched by filename) — never a genuinely embedded one.
+                // Media3 echoes it back as an ordinary text track in player.getCurrentTracks(),
+                // indistinguishable from a real embedded track unless marked — this id is what lets
+                // SubtitleSelectionController.rebuildEmbeddedOptions() tell them apart. Set here, once,
+                // instead of at each call site: a caller that forgot this (the original bug — two of
+                // three call sites never set it) got a phantom "(embedded)" option that could never
+                // actually extract anything, confirmed live on a real MP4 with no text track at all.
+                .setId(com.brouken.player.subs.SubtitleSelectionController.EXTERNAL_TRACK_ID_PREFIX + uri);
         if (selected) {
             subtitleConfigurationBuilder.setSelectionFlags(C.SELECTION_FLAG_DEFAULT);
         }

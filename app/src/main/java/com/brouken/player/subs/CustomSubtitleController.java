@@ -91,7 +91,11 @@ public class CustomSubtitleController
         root.addView(panel, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        translation = new TranslationController(context, sync, panel, handler, this::renderOverlay);
+        embedded = new EmbeddedSubtitleController(context, handler, null);
+        embedded.setListener(this::onExtractionStatus);
+
+        translation = new TranslationController(context, sync, panel, embedded, handler, this::renderOverlay,
+                this::promoteEmbeddedToOverlay);
         FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         ilp.gravity = Gravity.TOP | Gravity.END;
@@ -116,9 +120,6 @@ public class CustomSubtitleController
         nlp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
         nlp.topMargin = indicatorMargin;
         root.addView(notice, nlp);
-
-        embedded = new EmbeddedSubtitleController(context, handler, null);
-        embedded.setListener(this::onExtractionStatus);
 
         selection = new SubtitleSelectionController(context, player, trackSelector, this, handler);
         selection.setCache(embedded.cache()); // one store for every kind of subtitle
@@ -216,33 +217,15 @@ public class CustomSubtitleController
     }
 
     /**
-     * An embedded track has no cues to translate until we read them out of the container, so the
-     * request turns into "extract, then translate". Everything else already has its
-     * {@code SubtitleFile} and starts immediately.
+     * An embedded track with no cues extracted yet streams them out of the container while chunks
+     * translate as they close — {@link TranslationController#start} resolves that itself (see its
+     * class javadoc). Everything else already has its {@code SubtitleFile} and starts immediately.
      */
     @Override public void onStartTranslate() {
-        android.util.Log.i("EmbeddedSubtitles", "translate requested · selected="
-                + (selectedOption != null ? selectedOption.label + "/" + selectedOption.source : "none")
-                + " needsExtraction=" + needsExtraction());
-        if (needsExtraction()) {
-            SubtitleOption requested = selectedOption;
-            embedded.ensureExtracted(requested, file -> {
-                // The user can pick something else while a container read is still in flight
-                // (extraction has no notion of "abandoned" — it just keeps running); a stale
-                // extraction landing here must not clobber whatever is selected now, or adopt the
-                // wrong subtitle and start translating content nobody asked for anymore.
-                if (selectedOption != requested) return;
-                adoptExtractedAndAnnounce(file);
-                translation.start(currentPositionMs());
-            });
-            return;
-        }
         translation.start(currentPositionMs());
     }
 
-    // Also stops a still-running extraction — onStartTranslate() can leave one in flight (see
-    // needsExtraction()/ensureExtracted() above), and without this Cancel had nothing to stop it.
-    @Override public void onCancelTranslate() { embedded.cancel(); translation.cancel(); }
+    @Override public void onCancelTranslate() { translation.cancel(); }
 
     // Discards the cached translation too — "Restore Original" reading as final, not as "hide it for
     // now": leaving a translated chip on screen after explicitly asking for the original back would
@@ -294,6 +277,24 @@ public class CustomSubtitleController
         announceCacheUse();
     }
 
+    /**
+     * Passed to {@link TranslationController} so it can hand itself the screen the moment a streaming
+     * translate's first entries land, instead of requiring extraction to finish first the way the old
+     * two-step extract-then-translate flow did. Composes the same two granular steps
+     * {@link #onSubtitleLoaded} does for every other source — {@link SubtitleSelectionController#promoteSelectedToOverlay()}
+     * (Media3's native track off) and {@link #activateOverlay} (our overlay on) — minus the
+     * translation-source wiring {@code onSubtitleLoaded} also does: that wiring is
+     * {@code translation.setSource()}, which starts with {@code abandon()} — routing through
+     * {@code onSubtitleLoaded} here would cancel the very session whose first chunk just triggered
+     * this call. Not wired to {@link #autoSync}: unlike {@code onSubtitleLoaded}'s {@code file}
+     * (already complete), {@code current} here keeps growing after this call returns, and auto-sync
+     * has no way to be told about that — giving it this one snapshot would just go stale.
+     */
+    private void promoteEmbeddedToOverlay(SubtitleFile current) {
+        selection.promoteSelectedToOverlay();
+        activateOverlay(current, embedded.keyFor(selectedOption));
+    }
+
     private void onExtractionStatus(@Nullable String status) {
         panel.setExtractionStatus(status);
     }
@@ -340,9 +341,7 @@ public class CustomSubtitleController
 
     @Override public void onSubtitleLoaded(SubtitleFile file, SubtitleOption option) {
         ActiveSubtitle active = new ActiveSubtitle(option, file, embedded.keyFor(option));
-        SyncState saved = active.cacheKey != null ? embedded.cache().getSyncState(active.cacheKey) : null;
 
-        translation.setSource(active.file, selection.mediaTitle());
         // Set explicitly here, off `active.cacheKey` — deliberately NOT left for onOptionsChanged()'s
         // own translation.setCache(embedded.cache(), embedded.keyFor(selectedOption)) call to handle:
         // for external/provider, onExternalLoaded() fires this callback BEFORE calling refresh() (which
@@ -351,6 +350,7 @@ public class CustomSubtitleController
         // real translation stayed unfound in its own (correct) cache entry because the session was
         // still looking under yesterday's key. Same ordering hazard as the SubtitleFile itself (see the
         // Listener javadoc); same fix, set it from what was just handed in.
+        translation.setSource(active.file, selection.mediaTitle());
         translation.setCache(embedded.cache(), active.cacheKey);
 
         // A cache hit is effectively free — load it instead of the original, same reasoning as
@@ -373,10 +373,24 @@ public class CustomSubtitleController
             }
         }
 
-        sync.setSubtitle(toShow);
+        activateOverlay(toShow, active.cacheKey);
+        autoSync.setSource(active.file, mediaUri);
+    }
+
+    /**
+     * Makes {@code file} the visible subtitle: starts (or restarts) the sync session on it, restores
+     * any saved manual-sync offset for {@code cacheKey}, and re-renders. Pure view-layer activation —
+     * no opinion about where {@code file} came from, whether it is complete or still growing, or
+     * whether a translation session is running. {@link #onSubtitleLoaded} composes this with the
+     * translation/cache wiring a freshly-loaded external file needs; {@link #promoteEmbeddedToOverlay}
+     * composes it with only the Media3 hand-off a streaming translate's first entries need — see that
+     * method for why it must NOT also go through {@link #onSubtitleLoaded}.
+     */
+    private void activateOverlay(SubtitleFile file, @Nullable String cacheKey) {
+        SyncState saved = cacheKey != null ? embedded.cache().getSyncState(cacheKey) : null;
+        sync.setSubtitle(file);
         if (saved != null) sync.getSession().restoreState(saved);
         panel.setSyncSession(sync.getSession());
-        autoSync.setSource(active.file, mediaUri);
         renderOverlay();
     }
 
@@ -421,7 +435,7 @@ public class CustomSubtitleController
                 adoptExtractedAndAnnounce(cached);
             }
         }
-        translation.setExtractableSource(needsExtraction());
+        translation.setSelectedOption(selectedOption, selection.mediaTitle());
         translation.setCache(embedded.cache(), embedded.keyFor(selectedOption));
         panel.setOptions(options, selectedId, loadingMore);
     }

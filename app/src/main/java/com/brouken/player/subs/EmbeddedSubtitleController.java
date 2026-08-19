@@ -8,6 +8,7 @@ import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.Consumer;
@@ -15,12 +16,21 @@ import java.util.function.Consumer;
 import subtitleengine.cache.CachePolicy;
 import subtitleengine.cache.CachedSubtitle;
 import subtitleengine.cache.SubtitleCache;
+import subtitleengine.core.model.SubtitleEntry;
 import subtitleengine.core.model.SubtitleFile;
-import subtitleengine.embedded.EmbeddedExtractionSession;
-import subtitleengine.embedded.ExtractionProgress;
+import subtitleengine.pipeline.EntrySource;
+import subtitleengine.pipeline.ExtractingEntrySource;
+import subtitleengine.pipeline.InMemoryEntrySource;
+import subtitleengine.pipeline.SubtitlePipelineSession;
+import subtitleengine.translation.ChunkingConfig;
+import subtitleengine.translation.CompletionResult;
+import subtitleengine.translation.RunStatus;
+import subtitleengine.translation.SubtitleTranslator;
+import subtitleengine.translation.TranslationClient;
+import subtitleengine.translation.TranslationProgress;
 
 /**
- * Adapts the engine's {@link EmbeddedExtractionSession} to Android: builds the Media3-backed
+ * Adapts the engine's {@link SubtitlePipelineSession} to Android: builds the Media3-backed
  * provider, runs the read on a low-priority thread, formats progress for the panel, and hands the
  * finished {@link SubtitleFile} back to whoever asked for it.
  *
@@ -30,8 +40,14 @@ import subtitleengine.embedded.ExtractionProgress;
  * <p>Extraction is deliberately <b>on demand</b>: selecting an embedded track stays instant (Media3
  * renders it, as always), and only asking to translate or sync it pays for reading the container.
  * The result is cached per track, so a second request after a completed extraction is free.
+ *
+ * <p>Runs {@link SubtitlePipelineSession} in its no-translation mode ({@code start(null)}) — the same
+ * session type {@link TranslationController} drives when it needs to translate a track that hasn't
+ * been extracted yet (see {@link #entrySourceFor}). A translator is still required by the session's
+ * constructor even though this controller never asks it to translate anything; {@link #NEVER_CALLED}
+ * documents and enforces that.
  */
-public class EmbeddedSubtitleController implements SubtitleRetriever {
+public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePipelineSession.Listener {
 
     private static final String TAG = "EmbeddedSubtitles";
 
@@ -43,9 +59,19 @@ public class EmbeddedSubtitleController implements SubtitleRetriever {
         return t;
     };
 
+    /** Extraction-only mode never translates a single entry — a call here is a bug, not a runtime path. */
+    private static final TranslationClient NEVER_CALLED = new TranslationClient() {
+        @Override public String getName() { return "never-called"; }
+        @Override public String getModelId() { return "never-called"; }
+        @Override public CompletionResult complete(String systemPrompt, String userPrompt) {
+            throw new UnsupportedOperationException(
+                    "EmbeddedSubtitleController's session never translates — this should be unreachable");
+        }
+    };
+
     private final Context context;
     private final Handler mainHandler;
-    private final EmbeddedExtractionSession session;
+    private final SubtitlePipelineSession session;
     private final SubtitleCache cache;
     @Nullable private final java.util.Map<String, String> headers;
     /** Identity of the media, computed once from 128 KB — null when it has none (a live stream). */
@@ -54,6 +80,8 @@ public class EmbeddedSubtitleController implements SubtitleRetriever {
     @Nullable private Uri mediaUri;
     /** The callback waiting for the extraction in flight, if any. */
     @Nullable private Callback pendingCallback;
+    /** Latest subtitle the running session has reported, via onSubtitleUpdated — what a DONE result hands back. */
+    @Nullable private SubtitleFile lastEmittedFile;
     /** Last successful extraction, keyed by option id — re-opening Translate must not re-download. */
     @Nullable private String cachedOptionId;
     @Nullable private SubtitleFile cachedFile;
@@ -74,11 +102,9 @@ public class EmbeddedSubtitleController implements SubtitleRetriever {
         this.headers = headers;
         this.cache = new SubtitleCache(new FileCacheStore(context), CachePolicy.defaults(),
                 () -> SubtitleSettings.preferredLanguages(context).getTargets());
-        this.session = new EmbeddedExtractionSession(
-                new Media3EmbeddedSubtitleProvider(context, headers),
-                mainHandler::post,
-                THREAD_FACTORY,
-                this::onProgress);
+        this.session = new SubtitlePipelineSession(
+                new SubtitleTranslator(NEVER_CALLED), ChunkingConfig.defaults(), 1,
+                mainHandler::post, THREAD_FACTORY, this);
     }
 
     public void setListener(@Nullable Listener l) {
@@ -154,7 +180,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever {
     }
 
     public boolean isRunning() {
-        return session.status() == ExtractionProgress.Status.RUNNING;
+        return session.status() == RunStatus.RUNNING;
     }
 
     /**
@@ -186,7 +212,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever {
                 onReady.accept(file);
             }
             @Override public void onError(Exception e) {
-                // Already logged and toasted inside onProgress()'s DONE(no-cues)/ERROR branches.
+                // Already logged and toasted inside onPipelineProgress()'s DONE(no-cues)/ERROR branches.
             }
         });
         return true;
@@ -213,11 +239,8 @@ public class EmbeddedSubtitleController implements SubtitleRetriever {
             return cachedFile;
         }
         String key = keyFor(option);
-        session.setCache(cache, key);
-
-        // A finished read on disk costs nothing to reuse: no thread, no progress, no download.
-        CachedSubtitle hit = session.cached();
-        if (hit == null || hit.entryCount() == 0) return null;
+        CachedSubtitle hit = (key != null) ? cache.getSubtitle(key, System.currentTimeMillis()) : null;
+        if (hit == null || hit.entryCount() == 0 || !hit.isComplete()) return null;
         Log.i(TAG, "cache hit for track " + option.embeddedTextIndex + ": "
                 + hit.entryCount() + " cues, stored " + ageDescription(hit.getStoredAtMs()));
         cachedOptionId = option.id;
@@ -229,7 +252,46 @@ public class EmbeddedSubtitleController implements SubtitleRetriever {
     @Override
     public void fetchAndStore(SubtitleOption option, Callback callback) {
         pendingCallback = callback;
-        session.start(mediaUri.toString(), option.embeddedTextIndex, option.language);
+        lastEmittedFile = null;
+        EntrySource source = extractingSourceFor(option);
+        session.setSource(source, option.language, null);
+        session.setCache(cache, keyFor(option));
+        session.start(null);
+    }
+
+    /**
+     * An {@link EntrySource} for {@code option}'s embedded track — an in-memory one when a complete
+     * extraction is already cached, otherwise one that reads the container live, resuming from a
+     * cached partial if there is one. Used by {@link TranslationController} to translate a track
+     * that hasn't been extracted yet, without going through {@link #ensureExtracted}'s atomic
+     * "wait for the whole read, then call back" contract — the whole point of the pipeline session
+     * is that translation can start on the first chunk while extraction is still going.
+     *
+     * @return {@code null} if {@code option} isn't a (non-image) embedded track, or there's no media
+     */
+    @Nullable
+    public EntrySource entrySourceFor(SubtitleOption option) {
+        if (option == null || option.source != SubtitleOption.Source.EMBEDDED) return null;
+        if (option.imageFormat) return null;
+        if (mediaUri == null) return null;
+
+        SubtitleFile cachedComplete = peekCache(option);
+        if (cachedComplete != null) {
+            return new InMemoryEntrySource(cachedComplete.getEntries());
+        }
+        return extractingSourceFor(option);
+    }
+
+    private EntrySource extractingSourceFor(SubtitleOption option) {
+        String key = keyFor(option);
+        CachedSubtitle partial = (key != null) ? cache.getSubtitle(key, System.currentTimeMillis()) : null;
+        List<SubtitleEntry> cachedPrefix = (partial != null && !partial.isComplete()
+                && partial.getCoveredUpToMs() > 0 && partial.entryCount() > 0)
+                ? partial.getSubtitle().getEntries() : List.of();
+        long resumeFromMs = (partial != null && !partial.isComplete()) ? partial.getCoveredUpToMs() : 0L;
+        return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers),
+                mediaUri.toString(), option.embeddedTextIndex, option.language,
+                cachedPrefix, resumeFromMs, THREAD_FACTORY);
     }
 
     public void cancel() {
@@ -242,15 +304,22 @@ public class EmbeddedSubtitleController implements SubtitleRetriever {
         listener = null;
     }
 
-    /** Called on the main thread — the session dispatches through the player's handler. */
-    private void onProgress(ExtractionProgress progress) {
+    // --- SubtitlePipelineSession.Listener ---
+
+    @Override
+    public void onSubtitleUpdated(SubtitleFile current) {
+        lastEmittedFile = current;
+    }
+
+    @Override
+    public void onProgress(TranslationProgress progress) {
         switch (progress.getStatus()) {
             case RUNNING:
                 notifyStatus(String.format(Locale.US, "Reading subtitles from the video… %d%%",
-                        Math.round(progress.getFraction() * 100)));
+                        Math.round(progress.getSourceFraction() * 100)));
                 break;
             case DONE:
-                SubtitleFile file = progress.getResult();
+                SubtitleFile file = lastEmittedFile;
                 notifyStatus(null);
                 if (file == null || file.getEntries().isEmpty()) {
                     // Not an exception, but not usable either — and silence here would look like a hang.

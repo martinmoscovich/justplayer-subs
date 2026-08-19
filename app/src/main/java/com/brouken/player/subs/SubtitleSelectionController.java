@@ -263,11 +263,29 @@ public class SubtitleSelectionController {
         if (selectedId == null) return;
         SubtitleOption opt = findOption(selectedId);
         if (opt == null) return;
+        promoteSelectedToOverlay();
+        listener.onSubtitleLoaded(file, opt);
+        android.util.Log.i(TAG, "embedded track promoted to overlay: " + file.getEntries().size() + " cues");
+    }
+
+    /**
+     * Turns off Media3's native rendering for the currently-selected embedded track, without
+     * re-announcing it through {@link Listener#onSubtitleLoaded} — for a translate run that is
+     * already streaming content into the overlay itself (see {@code TranslationController}'s
+     * promotion callback). Routing that case through {@link #replaceActiveWithExtracted} instead
+     * would call back into {@code translation.setSource()}, which starts with {@code abandon()} —
+     * cancelling the very session whose first chunk just triggered this call.
+     * {@link #replaceActiveWithExtracted} composes this with the {@code onSubtitleLoaded}
+     * announcement for the on-select/Sync path, where that announcement is exactly what's wanted.
+     */
+    public void promoteSelectedToOverlay() {
+        if (selectedId == null) return;
+        SubtitleOption opt = findOption(selectedId);
+        if (opt == null) return;
         opt.trackState = SubtitleOption.TrackState.EXTRACTED;
         disableMedia3TextTrack();
-        listener.onSubtitleLoaded(file, opt);
         refresh();
-        android.util.Log.i(TAG, "embedded track promoted to overlay: " + file.getEntries().size() + " cues");
+        android.util.Log.i(TAG, "Media3 native text track disabled for '" + opt.label + "'");
     }
 
     // --- auto-selection (engine decides; this only maps to and from its model) ---

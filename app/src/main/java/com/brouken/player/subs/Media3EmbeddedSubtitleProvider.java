@@ -86,7 +86,11 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
             // raw codec payloads — the same wrapper DefaultExtractorsFactory uses for playback.
             extractor.init(new SubtitleTranscodingExtractorOutput(collector, new DefaultSubtitleParserFactory()));
 
-            readToEnd(extractor, input, dataSource, uri, length, resumeFromMs, collector, onProgress);
+            try {
+                readToEnd(extractor, input, dataSource, uri, length, resumeFromMs, collector, onProgress);
+            } catch (NoMatchingTextTrackException e) {
+                throw new IOException(e.getMessage());
+            }
 
             Log.i(TAG, "read " + collector.delivered + " cues from text track " + trackIndex
                     + " (" + collector.textTracksSeen + " text track(s) in the container)");
@@ -238,7 +242,25 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
             });
         }
 
-        @Override public void endTracks() { }
+        /**
+         * Fired once the extractor has declared every track the container has — for a standard MP4
+         * this happens right after parsing {@code moov}, before a single byte of {@code mdat} (the
+         * actual, potentially huge, audio/video payload) is touched. Without this check, a container
+         * with no text track (or none at {@code wantedTextTrackIndex}) was read all the way to
+         * {@code RESULT_END_OF_INPUT} before reporting that — for a large remote file over a throttled
+         * connection, that is minutes spent discovering something already knowable the moment the
+         * track list is complete. Thrown unchecked because {@link ExtractorOutput#endTracks()} declares
+         * no checked exception; {@link #readCues} unwraps it back into the documented
+         * {@link IOException}.
+         */
+        @Override public void endTracks() {
+            if (wantedTextTrackIndex >= textTracksSeen) {
+                throw new NoMatchingTextTrackException(textTracksSeen == 0
+                        ? "the container has no text tracks"
+                        : "no text track at index " + wantedTextTrackIndex + " (container has "
+                                + textTracksSeen + ")");
+            }
+        }
 
         /** Captured so a resumed read can ask it where a given timestamp lives in the file. */
         @Nullable SeekMap seekMap;
@@ -331,6 +353,13 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
             byte[] grown = new byte[size];
             System.arraycopy(buffer, 0, grown, 0, bufferedBytes);
             buffer = grown;
+        }
+    }
+
+    /** Thrown from {@link CueCollector#endTracks()} — see its javadoc. */
+    private static final class NoMatchingTextTrackException extends RuntimeException {
+        NoMatchingTextTrackException(String message) {
+            super(message);
         }
     }
 
