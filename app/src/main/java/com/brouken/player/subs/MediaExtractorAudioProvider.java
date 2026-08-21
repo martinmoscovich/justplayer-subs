@@ -8,6 +8,13 @@ import android.net.Uri;
 import android.util.Log;
 
 import androidx.annotation.Nullable;
+import androidx.media3.common.C;
+import androidx.media3.common.Format;
+import androidx.media3.decoder.DecoderInputBuffer;
+import androidx.media3.decoder.SimpleDecoderOutputBuffer;
+import androidx.media3.decoder.ffmpeg.FfmpegAudioDecoder;
+import androidx.media3.decoder.ffmpeg.FfmpegDecoderException;
+import androidx.media3.decoder.ffmpeg.FfmpegLibrary;
 
 import java.nio.ByteBuffer;
 import java.util.Locale;
@@ -61,6 +68,21 @@ import subtitleengine.vad.ResyncProgressListener;
  * integration, but nothing fills it yet — there's no header plumbing from the launching intent
  * anywhere else in the player either (tracked as a separate, pre-existing gap; see the plan's
  * "Fuera de este slice").
+ *
+ * <p><b>MediaCodec-less codecs fallback.</b> Some devices have no {@link MediaCodec} decoder
+ * installed for a codec at all (confirmed live on a Chromecast for AC3:
+ * {@code MediaCodec.createDecoderByType("audio/ac3")} throws {@code IllegalArgumentException:
+ * NAME_NOT_FOUND} — real playback still works because it passes the bitstream through to the TV/AVR
+ * over HDMI, which never touches this class). When that happens and {@link FfmpegLibrary#supportsFormat}
+ * says the FFmpeg decoder already bundled with this fork ({@code app/libs/lib-decoder-ffmpeg-release.aar}
+ * — see its {@code README.md} for the exact decoder list: vorbis/opus/flac/alac/mp3/aac/ac3/eac3/dca
+ * (DTS)/mlp/truehd/amrnb/amrwb/pcm_mulaw/pcm_alaw) covers this MIME type, this falls back to
+ * {@link FfmpegAudioDecoder} — same {@link MediaExtractor} demux as always, just a different decode
+ * backend. This does <em>not</em> help DTS specifically: on affected devices {@code MediaExtractor}
+ * itself never exposes a DTS track at all (see the {@code UnsupportedAudioTrackException} thrown
+ * below), a demuxing gap no decoder swap can fix — {@code PENDING.md} tracks that as separate, larger
+ * follow-up work (swapping the demux for Media3's own {@code MatroskaExtractor}, which does recognize
+ * DTS's codec IDs).
  */
 public class MediaExtractorAudioProvider implements AudioProvider {
 
@@ -90,13 +112,16 @@ public class MediaExtractorAudioProvider implements AudioProvider {
     public float[] extractAudioSegment(String source, double startSeconds, double durationSeconds,
                                         @Nullable ResyncProgressListener onProgress) {
         MediaExtractor extractor = new MediaExtractor();
-        MediaCodec decoder = null;
+        MediaCodec mediaCodecDecoder = null;
+        FfmpegAudioDecoder ffmpegDecoder = null;
         try {
             setDataSource(extractor, source);
 
             int audioTrackIndex = -1;
+            Log.w(TAG, "DIAG: extractor.getTrackCount()=" + extractor.getTrackCount());
             for (int i = 0; i < extractor.getTrackCount(); i++) {
                 String trackMime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME);
+                Log.w(TAG, "DIAG: track " + i + " mime=" + trackMime);
                 if (trackMime != null && trackMime.startsWith("audio/")) {
                     audioTrackIndex = i;
                     break;
@@ -124,11 +149,31 @@ public class MediaExtractorAudioProvider implements AudioProvider {
             long startUs = (long) (startSeconds * 1_000_000);
             extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
 
-            decoder = MediaCodec.createDecoderByType(mime);
-            decoder.configure(inputFormat, null, null, 0);
-            decoder.start();
+            try {
+                mediaCodecDecoder = MediaCodec.createDecoderByType(mime);
+            } catch (IllegalArgumentException noMediaCodecDecoder) {
+                // No hardware/software decoder installed for this codec at all (seen live for AC3 on
+                // a Chromecast) — try the bundled FFmpeg decoder before giving up. It only covers a
+                // handful of codecs on purpose (see decoder-ffmpeg/README.md), so this still fails
+                // for anything else exactly like before.
+                if (!FfmpegLibrary.isAvailable() || !FfmpegLibrary.supportsFormat(mime)) {
+                    throw new UnsupportedAudioTrackException(
+                            "No decoder available for " + mime + " (not covered by MediaCodec or "
+                                    + "the bundled FFmpeg decoder)");
+                }
+                Log.i(TAG, "extractAudioSegment: no MediaCodec decoder for " + mime
+                        + ", falling back to FFmpeg for " + describe(source));
+                ffmpegDecoder = createFfmpegDecoder(inputFormat, mime);
+            }
 
-            float[] result = decodeAndResample(extractor, decoder, startUs, durationSeconds, onProgress);
+            float[] result;
+            if (mediaCodecDecoder != null) {
+                mediaCodecDecoder.configure(inputFormat, null, null, 0);
+                mediaCodecDecoder.start();
+                result = decodeAndResampleMediaCodec(extractor, mediaCodecDecoder, startUs, durationSeconds, onProgress);
+            } else {
+                result = decodeAndResampleFfmpeg(extractor, ffmpegDecoder, startUs, durationSeconds, onProgress);
+            }
             // Requested vs delivered: a short window silently starves the resyncer's evidence gate,
             // which then reports "no confident match" with no hint that it was fed less than it asked
             // for. Decode can end early (EOS, stall timeout) and the seek lands on the previous sync
@@ -147,12 +192,50 @@ public class MediaExtractorAudioProvider implements AudioProvider {
             Log.e(TAG, "extractAudioSegment: failed for " + describe(source), e);
             return null;
         } finally {
-            if (decoder != null) {
-                try { decoder.stop(); } catch (Exception ignored) { }
-                try { decoder.release(); } catch (Exception ignored) { }
+            if (mediaCodecDecoder != null) {
+                try { mediaCodecDecoder.stop(); } catch (Exception ignored) { }
+                try { mediaCodecDecoder.release(); } catch (Exception ignored) { }
+            }
+            if (ffmpegDecoder != null) {
+                try { ffmpegDecoder.release(); } catch (Exception ignored) { }
             }
             try { extractor.release(); } catch (Exception ignored) { }
         }
+    }
+
+    /**
+     * ac3/eac3/dca (the codecs the Chromecast gap is actually about) need no codec-specific init data
+     * — {@code FfmpegAudioDecoder.getExtraData} falls through to {@code null} for them, since the
+     * elementary stream self-describes sample rate/channels in each frame's header. Other codecs the
+     * bundled decoder also covers (aac, opus, vorbis, alac, flac) do need it, sourced from the
+     * container's {@code csd-N} buffers — plumbed through here so the fallback is correct for all of
+     * them, not just the two this class was written for, even though MediaCodec lacking a decoder for
+     * one of those (near-universal on real devices) would be a very unusual thing to hit in practice.
+     */
+    private FfmpegAudioDecoder createFfmpegDecoder(MediaFormat inputFormat, String mime) throws FfmpegDecoderException {
+        Format format = new Format.Builder()
+                .setSampleMimeType(mime)
+                .setSampleRate(inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                .setChannelCount(inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                .setInitializationData(codecSpecificData(inputFormat))
+                .build();
+        return new FfmpegAudioDecoder(
+                format, /* numInputBuffers= */ 2, /* numOutputBuffers= */ 2,
+                /* initialInputBufferSize= */ 256 * 1024, /* outputFloat= */ false);
+    }
+
+    /** Collects {@code csd-0}, {@code csd-1}, ... from the container's format, in order — empty for a
+     *  codec (like ac3/eac3/dca) whose format carries none. */
+    private static java.util.List<byte[]> codecSpecificData(MediaFormat format) {
+        java.util.List<byte[]> data = new java.util.ArrayList<>();
+        for (int i = 0; ; i++) {
+            ByteBuffer csd = format.getByteBuffer("csd-" + i);
+            if (csd == null) break;
+            byte[] bytes = new byte[csd.remaining()];
+            csd.duplicate().get(bytes); // duplicate: never consume the format's own buffer
+            data.add(bytes);
+        }
+        return data;
     }
 
     private void setDataSource(MediaExtractor extractor, String source) throws java.io.IOException {
@@ -174,7 +257,7 @@ public class MediaExtractorAudioProvider implements AudioProvider {
      * valid "no audio in range" result, not a failure (the caller's PCM-core check rejects it).
      */
     @Nullable
-    private float[] decodeAndResample(MediaExtractor extractor, MediaCodec decoder, long startUs,
+    private float[] decodeAndResampleMediaCodec(MediaExtractor extractor, MediaCodec decoder, long startUs,
                                        double durationSeconds, @Nullable ResyncProgressListener onProgress) {
         long endUs = startUs + (long) (durationSeconds * 1_000_000);
         MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
@@ -185,7 +268,7 @@ public class MediaExtractorAudioProvider implements AudioProvider {
 
         while (!outputDone) {
             if (Thread.currentThread().isInterrupted()) {
-                Log.w(TAG, "decodeAndResample: interrupted, aborting extraction");
+                Log.w(TAG, "decodeAndResampleMediaCodec: interrupted, aborting extraction");
                 return null;
             }
             boolean progressed = false;
@@ -243,9 +326,110 @@ public class MediaExtractorAudioProvider implements AudioProvider {
             if (progressed) {
                 staleIterations = 0;
             } else if (++staleIterations > MAX_STALLED_ITERATIONS) {
-                Log.w(TAG, "decodeAndResample: decoder made no progress for " + MAX_STALLED_ITERATIONS
+                Log.w(TAG, "decodeAndResampleMediaCodec: decoder made no progress for " + MAX_STALLED_ITERATIONS
                         + " iterations, aborting instead of hanging forever");
                 return null;
+            }
+        }
+
+        return acc != null ? acc.finish() : new float[0];
+    }
+
+    /**
+     * Same shape as {@link #decodeAndResampleMediaCodec}, against {@link FfmpegAudioDecoder}'s
+     * {@link androidx.media3.decoder.Decoder} API instead of {@link MediaCodec}'s buffer-index one —
+     * {@code dequeueInputBuffer()}/{@code dequeueOutputBuffer()} return the buffer object directly
+     * (or {@code null} if none is available yet) rather than an index, and there's no dequeue
+     * timeout to lean on, so the stall/interruption bookkeeping below does the same job the 10ms
+     * {@code dequeueOutputBuffer(bufferInfo, 10_000)} timeout does in the MediaCodec path.
+     */
+    @Nullable
+    private float[] decodeAndResampleFfmpeg(MediaExtractor extractor, FfmpegAudioDecoder decoder, long startUs,
+                                            double durationSeconds, @Nullable ResyncProgressListener onProgress)
+            throws FfmpegDecoderException {
+        long endUs = startUs + (long) (durationSeconds * 1_000_000);
+        boolean inputDone = false;
+        boolean outputDone = false;
+        int staleIterations = 0;
+        PcmDownmixResampler acc = null; // created once the real decoder output format is known
+
+        while (!outputDone) {
+            if (Thread.currentThread().isInterrupted()) {
+                Log.w(TAG, "decodeAndResampleFfmpeg: interrupted, aborting extraction");
+                return null;
+            }
+            boolean progressed = false;
+
+            if (!inputDone) {
+                DecoderInputBuffer inputBuffer = decoder.dequeueInputBuffer();
+                if (inputBuffer != null) {
+                    progressed = true;
+                    // Direct-mode buffer replacement grows this for us if a frame is ever bigger —
+                    // 256KB is already generous for a single AC3/E-AC3 frame, so in practice this
+                    // never reallocates past the first call.
+                    inputBuffer.ensureSpaceForWrite(256 * 1024);
+                    ByteBuffer data = inputBuffer.data;
+                    int sampleSize = data != null ? extractor.readSampleData(data, 0) : -1;
+                    if (sampleSize < 0 || extractor.getSampleTime() > endUs) {
+                        inputBuffer.timeUs = 0;
+                        inputBuffer.addFlag(C.BUFFER_FLAG_END_OF_STREAM);
+                        decoder.queueInputBuffer(inputBuffer);
+                        inputDone = true;
+                    } else {
+                        // FfmpegAudioDecoder reads the sample size off data.limit(), not a separate
+                        // offset/size pair (unlike MediaCodec.queueInputBuffer) — set both explicitly
+                        // rather than relying on whatever position/limit readSampleData happened to
+                        // leave behind.
+                        data.position(0);
+                        data.limit(sampleSize);
+                        inputBuffer.timeUs = extractor.getSampleTime();
+                        decoder.queueInputBuffer(inputBuffer);
+                        extractor.advance();
+                    }
+                }
+            }
+
+            SimpleDecoderOutputBuffer outputBuffer = decoder.dequeueOutputBuffer();
+            if (outputBuffer != null) {
+                progressed = true;
+                if (outputBuffer.isEndOfStream()) {
+                    outputBuffer.release();
+                    outputDone = true;
+                } else {
+                    if (!outputBuffer.shouldBeSkipped && outputBuffer.data != null
+                            && outputBuffer.timeUs >= startUs) {
+                        if (acc == null) {
+                            acc = new PcmDownmixResampler(
+                                    decoder.getSampleRate(), decoder.getChannelCount(), TARGET_RATE);
+                        }
+                        acc.append(outputBuffer.data, outputBuffer.data.remaining());
+                        if (onProgress != null && durationSeconds > 0) {
+                            double coveredUs = Math.max(0, outputBuffer.timeUs - startUs);
+                            double fraction = Math.max(0.0, Math.min(1.0, coveredUs / (durationSeconds * 1_000_000)));
+                            onProgress.onProgress(ResyncProgressListener.Phase.EXTRACTING, fraction);
+                        }
+                    }
+                    outputBuffer.release();
+                }
+            }
+
+            if (progressed) {
+                staleIterations = 0;
+            } else if (++staleIterations > MAX_STALLED_ITERATIONS) {
+                Log.w(TAG, "decodeAndResampleFfmpeg: decoder made no progress for " + MAX_STALLED_ITERATIONS
+                        + " iterations, aborting instead of hanging forever");
+                return null;
+            } else {
+                // Unlike MediaCodec.dequeueOutputBuffer(bufferInfo, 10_000), FfmpegAudioDecoder's
+                // dequeue calls never block — without this, an iteration with nothing to do yet
+                // (waiting on the decode thread) would spin the CPU and burn through
+                // MAX_STALLED_ITERATIONS in microseconds instead of the ~20s it's meant to allow.
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
             }
         }
 
