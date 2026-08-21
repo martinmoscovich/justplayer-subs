@@ -71,7 +71,7 @@
         <EditTextPreference
             app:key="pref_ai_model"
             app:title="Model"
-            app:defaultValue="google/gemini-2.5-flash"
+            app:defaultValue="@string/subs_default_ai_model"
             app:useSimpleSummaryProvider="true" />
         <EditTextPreference
             app:key="pref_ai_api_key"

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Single source of truth for subtitle-setting defaults that more than one place needs.
+
+  The app keeps its settings in its own SharedPreferences file (SubtitleSettings.PREFS_FILE) and
+  never calls PreferenceManager.setDefaultValues(), so on a fresh install the key simply is not in
+  prefs and the *Java* fallback is what actually decides the default — res/xml/subtitle_settings.xml's
+  app:defaultValue only lands once the user opens the settings screen. That makes a drifting literal
+  a real behaviour difference, not a cosmetic one, which is why these live here and are referenced
+  from both sides instead of being retyped.
+-->
+<resources>
+    <string name="subs_default_ai_model" translatable="false">google/gemini-2.5-flash-lite</string>
+</resources>

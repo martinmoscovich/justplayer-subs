@@ -2,6 +2,8 @@ package com.brouken.player.subs;
 
 import android.content.Context;
 
+import com.brouken.player.R;
+
 import okhttp3.OkHttpClient;
 import subtitleengine.core.model.SubtitleError;
 import subtitleengine.translation.CompletionResult;
@@ -44,7 +46,8 @@ class SettingsTranslationClient implements TranslationClient {
 
     private TranslationClient build() {
         String provider = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER, "openrouter");
-        String model = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_MODEL, "google/gemini-2.5-flash");
+        String model = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_MODEL,
+                context.getString(R.string.subs_default_ai_model));
         String apiKey = SubtitleSettings.getApiKey(context, SubtitleSettings.KEY_AI_API_KEY);
         if ("gemini".equals(provider)) {
             return new GeminiClient(apiKey, model, http);
