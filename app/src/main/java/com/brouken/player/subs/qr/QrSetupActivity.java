@@ -11,6 +11,7 @@ import android.os.Looper;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ImageView;
@@ -21,6 +22,9 @@ import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
+
+import com.brouken.player.subs.ui.SubsButton;
+import com.brouken.player.subs.ui.SubsTheme;
 
 import com.google.zxing.BarcodeFormat;
 import com.google.zxing.MultiFormatWriter;
@@ -63,6 +67,7 @@ public class QrSetupActivity extends AppCompatActivity implements QrSetupServer.
     @Nullable private QrSetupServer server;
     private TextView countdownView;
     private TextView statusView;
+    private SubsButton cancelButton;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -227,66 +232,97 @@ public class QrSetupActivity extends AppCompatActivity implements QrSetupServer.
 
     private View buildMainView(String url) {
         ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(0xFF101418);
+        scroll.setBackgroundColor(SubsTheme.SURFACE_1);
         scroll.setFillViewport(true);
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setGravity(Gravity.CENTER_HORIZONTAL);
-        column.setPadding(dp(24), dp(24), dp(24), dp(24));
+        column.setPadding(dp(24), dp(20), dp(24), dp(20));
         scroll.addView(column, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        TextView heading = new TextView(this);
+        TextView heading = SubsTheme.headlineMd(new TextView(this));
         heading.setText("Set up via QR");
-        heading.setTextColor(0xFFFFFFFF);
-        heading.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        heading.setTextColor(SubsTheme.INK);
+        heading.setGravity(Gravity.CENTER_HORIZONTAL);
         heading.setPadding(0, 0, 0, dp(8));
         column.addView(heading);
 
-        TextView hint = new TextView(this);
+        TextView hint = SubsTheme.bodyMd(new TextView(this));
         hint.setText("Scan this with your phone on the same Wi-Fi/network to fill in API keys and languages.");
-        hint.setTextColor(0xFF90A4AE);
-        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        hint.setTextColor(SubsTheme.INK_2);
         hint.setGravity(Gravity.CENTER_HORIZONTAL);
-        hint.setPadding(0, 0, 0, dp(20));
+        hint.setPadding(0, 0, 0, dp(16));
         column.addView(hint);
 
         ImageView qrView = new ImageView(this);
         int qrDp = dp(240);
         LinearLayout.LayoutParams qrParams = new LinearLayout.LayoutParams(qrDp, qrDp);
         qrView.setLayoutParams(qrParams);
-        qrView.setBackgroundColor(0xFFFFFFFF);
+        qrView.setBackgroundColor(0xFFFFFFFF); // the code itself has to stay black-on-white to scan
         qrView.setImageBitmap(generateQrBitmap(url));
         column.addView(qrView);
 
-        countdownView = new TextView(this);
+        // The countdown used to be a bare "5:00" with nothing saying what it counted down to. The
+        // label above carries that now; a sentence spelling it out was tried too and cut, because it
+        // pushed the screen into scrolling — and a setup screen you have to scroll to see the button
+        // on is worse than one that explains less.
+        TextView countdownLabel = SubsTheme.labelSm(new TextView(this));
+        countdownLabel.setText("EXPIRES IN");
+        countdownLabel.setTextColor(SubsTheme.INK_3);
+        countdownLabel.setGravity(Gravity.CENTER_HORIZONTAL);
+        countdownLabel.setPadding(0, dp(16), 0, dp(2));
+        column.addView(countdownLabel);
+
+        countdownView = SubsTheme.display(new TextView(this));
         countdownView.setText("5:00");
-        countdownView.setTextColor(0xFF4DD0E1);
-        countdownView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-        countdownView.setPadding(0, dp(16), 0, 0);
+        countdownView.setTextColor(SubsTheme.PRIMARY);
+        countdownView.setGravity(Gravity.CENTER_HORIZONTAL);
         column.addView(countdownView);
 
-        statusView = new TextView(this);
-        statusView.setTextColor(0xFF90A4AE);
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        statusView = SubsTheme.labelSm(new TextView(this));
+        statusView.setTextColor(SubsTheme.INK_2);
         statusView.setGravity(Gravity.CENTER_HORIZONTAL);
-        statusView.setPadding(0, dp(12), 0, 0);
+        statusView.setPadding(0, dp(10), 0, 0);
         column.addView(statusView);
 
+        // Sole control on the screen, so it holds the focus look from the start — there is nowhere
+        // else for the D-pad to go, and Back does the same thing.
+        cancelButton = new SubsButton(this, "Cancel");
+        cancelButton.setFocusedState(true);
+        cancelButton.setOnClickListener(v -> finish());
+        // rowParams(), not hand-rolled params: that is where the standard button height lives, and
+        // WRAP_CONTENT made this one visibly shorter than every other button in the app.
+        LinearLayout.LayoutParams cancelLp = cancelButton.rowParams();
+        cancelLp.topMargin = dp(16);
+        column.addView(cancelButton, cancelLp);
+
         return scroll;
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                finish(); // Cancel is the only control here
+                return true;
+            default:
+                return super.onKeyDown(keyCode, event);
+        }
     }
 
     private View buildErrorView(String message) {
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setGravity(Gravity.CENTER);
-        column.setBackgroundColor(0xFF101418);
+        column.setBackgroundColor(SubsTheme.SURFACE_1);
         column.setPadding(dp(32), dp(32), dp(32), dp(32));
 
-        TextView text = new TextView(this);
+        TextView text = SubsTheme.bodyLg(new TextView(this));
         text.setText(message);
-        text.setTextColor(0xFFFFFFFF);
-        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        text.setTextColor(SubsTheme.ERROR);
         text.setGravity(Gravity.CENTER);
         column.addView(text);
         return column;
