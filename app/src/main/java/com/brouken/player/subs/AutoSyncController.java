@@ -59,7 +59,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     // From Start keeps a generous window to survive long dialogue-free intros/credits, and searches
     // widely since a fixed 0s start has no prior on the true offset. From Here assumes the user
     // already heard dialogue at the current position — a smaller window is enough (faster extraction,
-    // especially over HTTP: MediaExtractorAudioProvider seeks + decodes only the requested duration)
+    // especially over HTTP: Media3AudioProvider seeks + decodes only the requested duration)
     // AND a much smaller search range is enough (the user is presumably already roughly in sync). The
     // two must NOT share maxOffsetSeconds: SubtitleResyncer's evidence gate (matchedEvents) scales
     // with maxOffsetSeconds — at 120s the bar is ~11 matched cues regardless of window size, which a
@@ -295,7 +295,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
 
     private AutoSyncSession ensureSession() {
         if (session == null) {
-            resyncer = new SubtitleResyncer(new SileroVadEngine(), new MediaExtractorAudioProvider(context, null));
+            resyncer = new SubtitleResyncer(new SileroVadEngine(), new Media3AudioProvider(context, null));
             session = new AutoSyncSession(resyncer, mainHandler::post, backgroundPriorityThreadFactory(), this);
             session.setSource(mediaUri != null ? mediaUri.toString() : null, subtitle);
         }

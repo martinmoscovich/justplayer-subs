@@ -11,11 +11,6 @@ import androidx.media3.common.Format;
 import androidx.media3.common.text.Cue;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.datasource.DataSource;
-import androidx.media3.datasource.DataSpec;
-import androidx.media3.datasource.DefaultDataSource;
-import androidx.media3.datasource.DefaultHttpDataSource;
-import androidx.media3.extractor.DefaultExtractorInput;
-import androidx.media3.extractor.DefaultExtractorsFactory;
 import androidx.media3.extractor.Extractor;
 import androidx.media3.extractor.ExtractorInput;
 import androidx.media3.extractor.ExtractorOutput;
@@ -70,13 +65,13 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
     public void readCues(String source, int trackIndex, long resumeFromMs,
                          @Nullable ProgressListener onProgress, CueSink sink) throws Exception {
         Uri uri = Uri.parse(source);
-        DataSource dataSource = buildDataSource();
+        DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers);
         Extractor extractor = null;
         try {
-            long length = dataSource.open(new DataSpec(uri));
-            ExtractorInput input = new DefaultExtractorInput(dataSource, 0, length);
+            ExtractorInput input = Media3ExtractorSource.openAt(dataSource, uri, 0);
+            long length = input.getLength();
 
-            extractor = selectExtractor(input);
+            extractor = Media3ExtractorSource.sniff(input, uri);
             if (extractor == null) {
                 throw new IOException("no Media3 extractor recognised this container");
             }
@@ -103,40 +98,6 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
             }
             try { dataSource.close(); } catch (Exception ignored) { }
         }
-    }
-
-    /** Media3's own default (8s) is tuned for a single request, not walking a remote container
-     *  through a slow debrid mirror — real-world timeouts observed at 0% progress well before 8s
-     *  worth of data could plausibly have arrived. */
-    private static final int HTTP_TIMEOUT_MS = 30_000;
-
-    private DataSource buildDataSource() {
-        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setConnectTimeoutMs(HTTP_TIMEOUT_MS)
-                .setReadTimeoutMs(HTTP_TIMEOUT_MS)
-                // Debrid links redirect between http and https; without this the read dies on the
-                // first redirect while playback (which sets it elsewhere) carries on fine.
-                .setAllowCrossProtocolRedirects(true);
-        if (headers != null && !headers.isEmpty()) {
-            http.setDefaultRequestProperties(headers);
-        }
-        return new DefaultDataSource.Factory(context, http).createDataSource();
-    }
-
-    /** Sniffs the container against every known extractor, rewinding the peek position between tries. */
-    @Nullable
-    private static Extractor selectExtractor(ExtractorInput input) throws IOException {
-        for (Extractor candidate : new DefaultExtractorsFactory().createExtractors()) {
-            try {
-                if (candidate.sniff(input)) return candidate;
-            } catch (java.io.EOFException ignored) {
-                // Ran out of bytes while peeking: that is a "no", not a read failure. Any other
-                // IOException is a real problem and propagates.
-            } finally {
-                input.resetPeekPosition();
-            }
-        }
-        return null;
     }
 
     /**
@@ -174,11 +135,7 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
                     SeekMap.SeekPoints points = map.getSeekPoints(resumeFromMs * 1000L);
                     long position = points.first.position;
                     extractor.seek(position, points.first.timeUs);
-                    dataSource.close();
-                    long remaining = dataSource.open(
-                            new DataSpec.Builder().setUri(uri).setPosition(position).build());
-                    currentInput = new DefaultExtractorInput(dataSource, position,
-                            remaining == C.LENGTH_UNSET ? C.LENGTH_UNSET : position + remaining);
+                    currentInput = Media3ExtractorSource.openAt(dataSource, uri, position);
                     Log.i(TAG, "resuming from " + resumeFromMs + "ms → byte " + position
                             + " of " + total);
                 } else {
@@ -191,15 +148,11 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
             if (result == Extractor.RESULT_SEEK) {
                 // The extractor wants to continue elsewhere (an MP4 moov at the end, a Matroska
                 // cluster jump): reopen the source there and hand it a fresh input at that offset.
-                long seekPosition = positionHolder.position;
-                dataSource.close();
-                long remaining = dataSource.open(
-                        new DataSpec.Builder().setUri(uri).setPosition(seekPosition).build());
-                if (remaining != C.LENGTH_UNSET && total != C.LENGTH_UNSET) {
-                    total = seekPosition + remaining;
+                currentInput = Media3ExtractorSource.openAt(dataSource, uri, positionHolder.position);
+                long reopenedLength = currentInput.getLength();
+                if (reopenedLength != C.LENGTH_UNSET && total != C.LENGTH_UNSET) {
+                    total = reopenedLength;
                 }
-                currentInput = new DefaultExtractorInput(dataSource, seekPosition,
-                        remaining == C.LENGTH_UNSET ? C.LENGTH_UNSET : seekPosition + remaining);
             } else if (onProgress != null && total != C.LENGTH_UNSET && total > 0) {
                 double fraction = (double) currentInput.getPosition() / total;
                 int bucket = (int) (fraction * 200);
