@@ -91,6 +91,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     private static final double FROM_HERE_SECOND_PROBE_JUMP_SECONDS = 60.0;
 
     private final Context context;
+    private final java.util.function.Supplier<java.util.Map<String, String>> headers;
     private final SubtitlePanel panel;
     private final Handler mainHandler;
     private final SubsPill indicator;
@@ -114,7 +115,16 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     @Nullable private String indicatorTerminalText; // non-null while the post-run flash is live
     private long indicatorTerminalUntilMs;           // System.currentTimeMillis() deadline for the flash
 
-    public AutoSyncController(Context context, SubtitlePanel panel, Handler mainHandler) {
+    /**
+     * @param headers supplies the intent's request headers at the moment a run starts, not at
+     *                construction: {@code PlayerActivity.apiHeaders} is <em>reassigned</em> when an
+     *                intent is parsed, so a map captured here would go stale on the next
+     *                {@code onNewIntent}. Extraction opens the same URL playback does and needs
+     *                whatever playback needed to open it.
+     */
+    public AutoSyncController(Context context, SubtitlePanel panel, Handler mainHandler,
+                              java.util.function.Supplier<java.util.Map<String, String>> headers) {
+        this.headers = headers;
         this.context = context.getApplicationContext();
         this.panel = panel;
         this.mainHandler = mainHandler;
@@ -295,7 +305,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
 
     private AutoSyncSession ensureSession() {
         if (session == null) {
-            resyncer = new SubtitleResyncer(new SileroVadEngine(), new Media3AudioProvider(context, null));
+            resyncer = new SubtitleResyncer(new SileroVadEngine(), new Media3AudioProvider(context, headers.get()));
             session = new AutoSyncSession(resyncer, mainHandler::post, backgroundPriorityThreadFactory(), this);
             session.setSource(mediaUri != null ? mediaUri.toString() : null, subtitle);
         }

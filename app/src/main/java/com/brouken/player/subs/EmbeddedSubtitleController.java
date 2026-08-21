@@ -96,7 +96,8 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
     private final Handler mainHandler;
     private final SubtitlePipelineSession session;
     private final SubtitleCache cache;
-    @Nullable private final java.util.Map<String, String> headers;
+    /** Resolved per use, never captured — see AutoSyncController's constructor for why. */
+    private final java.util.function.Supplier<java.util.Map<String, String>> headers;
     /** Identity of the media, computed once from 128 KB — null when it has none (a live stream). */
     @Nullable private String videoHash;
 
@@ -126,7 +127,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
     }
 
     public EmbeddedSubtitleController(Context context, Handler mainHandler,
-                                      @Nullable java.util.Map<String, String> headers) {
+                                      java.util.function.Supplier<java.util.Map<String, String>> headers) {
         this.context = context;
         this.mainHandler = mainHandler;
         this.headers = headers;
@@ -171,7 +172,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         // simply means this media runs uncached rather than failing.
         new Thread(() -> {
             long startMs = System.currentTimeMillis();
-            String[] hashAndSize = MediaHasher.hashAndSize(context, mediaUri, headers);
+            String[] hashAndSize = MediaHasher.hashAndSize(context, mediaUri, headers.get());
             long elapsedMs = System.currentTimeMillis() - startMs;
             mainHandler.post(() -> {
                 if (!mediaUri.equals(this.mediaUri)) return; // media changed while we hashed
@@ -329,7 +330,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
                 && partial.getCoveredUpToMs() > 0 && partial.entryCount() > 0)
                 ? partial.getSubtitle().getEntries() : List.of();
         long resumeFromMs = (partial != null && !partial.isComplete()) ? partial.getCoveredUpToMs() : 0L;
-        return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers),
+        return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers.get()),
                 mediaUri.toString(), option.embeddedTextIndex, option.language,
                 cachedPrefix, resumeFromMs, THREAD_FACTORY);
     }
@@ -377,11 +378,11 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         String language = option.language;
         return fromMs -> {
             if (fromMs > 0) {
-                return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers),
+                return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers.get()),
                         uri, trackIndex, language, List.of(), fromMs, PRIORITY_PASS_INDEX_OFFSET, THREAD_FACTORY);
             }
             if (positionPriority) {
-                return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers),
+                return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers.get()),
                         uri, trackIndex, language, List.of(), 0L, THREAD_FACTORY);
             }
             return extractingSourceFor(option);

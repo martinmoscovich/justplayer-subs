@@ -2,6 +2,7 @@ package com.brouken.player.subs;
 
 import android.content.Context;
 import android.net.Uri;
+import android.util.Base64;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
@@ -16,6 +17,7 @@ import androidx.media3.extractor.ExtractorInput;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -49,30 +51,48 @@ final class Media3ExtractorSource {
     /**
      * Data source for any scheme the player accepts — http(s), file, content, asset.
      *
-     * <p>{@code User-Agent} is pulled out of {@code headers} and set through its own setter rather
-     * than left among the request properties, matching what {@code PlayerActivity} does for
-     * playback: {@link DefaultHttpDataSource} treats it as a first-class field, and how it merges a
-     * request property of the same name is not something to depend on. Neither of the two callers
-     * did this before they shared this method — playback did, which is exactly the kind of split
-     * behaviour that made unifying worthwhile.
+     * <p>Carries everything playback would carry for the same URL, because it opens the same URL:
+     * the launching intent's headers, and basic auth derived from the URI's own user info. Playback
+     * builds that pair in {@code PlayerActivity}; extraction used to open the media bare, so a source
+     * that played fine could still fail to auto-sync or to read its embedded subtitles. User info
+     * wins over an intent header of the same name, the same precedence playback uses — it is the more
+     * specific of the two for this exact URI.
+     *
+     * <p>These are the <em>media</em> credentials and go only to media requests. OpenSubtitles and the
+     * AI providers authenticate on their own terms and must never see them.
+     *
+     * <p>{@code User-Agent} is pulled out and set through its own setter rather than left among the
+     * request properties: {@link DefaultHttpDataSource} treats it as a first-class field, and how it
+     * merges a request property of the same name is not something to depend on.
      */
-    static DataSource createDataSource(Context context, @Nullable Map<String, String> headers) {
+    static DataSource createDataSource(Context context, @Nullable Map<String, String> headers,
+                                       @Nullable Uri mediaUri) {
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
                 .setConnectTimeoutMs(HTTP_TIMEOUT_MS)
                 .setReadTimeoutMs(HTTP_TIMEOUT_MS)
                 // Debrid links redirect between http and https; without this the read dies on the
                 // first redirect while playback (which sets it elsewhere) carries on fine.
                 .setAllowCrossProtocolRedirects(true);
-        if (headers != null && !headers.isEmpty()) {
-            // Copy: the caller's map is theirs, and extracting User-Agent must not mutate it.
-            Map<String, String> requestProperties = new LinkedHashMap<>(headers);
-            String userAgent = removeIgnoreCase(requestProperties, "User-Agent");
-            if (userAgent != null) {
-                http.setUserAgent(userAgent);
-            }
-            if (!requestProperties.isEmpty()) {
-                http.setDefaultRequestProperties(requestProperties);
-            }
+
+        // Copy: the caller's map is theirs, and neither extracting User-Agent nor adding basic auth
+        // may mutate it.
+        Map<String, String> requestProperties =
+                headers == null ? new LinkedHashMap<>() : new LinkedHashMap<>(headers);
+
+        String userAgent = removeIgnoreCase(requestProperties, "User-Agent");
+        if (userAgent != null) {
+            http.setUserAgent(userAgent);
+        }
+
+        String userInfo = mediaUri == null ? null : mediaUri.getUserInfo();
+        if (userInfo != null && !userInfo.isEmpty() && userInfo.contains(":")) {
+            removeIgnoreCase(requestProperties, "Authorization");
+            requestProperties.put("Authorization",
+                    "Basic " + Base64.encodeToString(userInfo.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP));
+        }
+
+        if (!requestProperties.isEmpty()) {
+            http.setDefaultRequestProperties(requestProperties);
         }
         return new DefaultDataSource.Factory(context, http).createDataSource();
     }

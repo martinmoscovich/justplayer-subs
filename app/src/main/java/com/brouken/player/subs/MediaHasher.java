@@ -54,7 +54,7 @@ public final class MediaHasher {
     /** @return {@code [hexHash, sizeBytes]}, or {@code null} — OpenSubtitles matches on both. */
     @Nullable
     public static String[] hashAndSize(Context context, Uri uri, @Nullable Map<String, String> headers) {
-        DataSource dataSource = build(context, headers);
+        DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers, uri);
         try {
             long size = dataSource.open(new DataSpec.Builder().setUri(uri).build());
             if (size == C.LENGTH_UNSET || size <= 0) {
@@ -98,14 +98,5 @@ public final class MediaHasher {
             throw new IOException("expected " + length + " bytes, got " + read);
         }
         return buf;
-    }
-
-    private static DataSource build(Context context, @Nullable Map<String, String> headers) {
-        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setAllowCrossProtocolRedirects(true)
-                .setConnectTimeoutMs(HTTP_TIMEOUT_MS)
-                .setReadTimeoutMs(HTTP_TIMEOUT_MS);
-        if (headers != null && !headers.isEmpty()) http.setDefaultRequestProperties(headers);
-        return new DefaultDataSource.Factory(context, http).createDataSource();
     }
 }

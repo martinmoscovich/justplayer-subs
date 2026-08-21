@@ -106,7 +106,7 @@ public class Media3AudioProvider implements AudioProvider {
         long startUs = (long) (startSeconds * 1_000_000);
         long endUs = startUs + (long) (durationSeconds * 1_000_000);
         Uri uri = Uri.parse(source);
-        DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers);
+        DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers, uri);
         Extractor extractor = null;
         FfmpegAudioDecoder decoder = null;
         try {

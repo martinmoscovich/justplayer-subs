@@ -84,8 +84,19 @@ public class CustomSubtitleController
         }
     }
 
+    /**
+     * @param headers supplies the launching intent's request headers on demand, for the components
+     *                that fetch the media itself (audio extraction, embedded subtitles, hashing).
+     *                Playback already sends these; extraction opened the same URL bare, so a source
+     *                that plays could still fail to auto-sync. A {@code Supplier} rather than the map
+     *                because {@code PlayerActivity.apiHeaders} is <em>reassigned</em> on intent
+     *                parsing — a captured map would go stale on the next {@code onNewIntent}.
+     *                Media credentials only: OpenSubtitles and the AI providers authenticate on their
+     *                own terms and never see these.
+     */
     public CustomSubtitleController(Context context, ViewGroup root, ExoPlayer player,
-                                    DefaultTrackSelector trackSelector) {
+                                    DefaultTrackSelector trackSelector,
+                                    java.util.function.Supplier<java.util.Map<String, String>> headers) {
         this.context = context;
         this.player = player;
 
@@ -108,7 +119,7 @@ public class CustomSubtitleController
         root.addView(panel, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        embedded = new EmbeddedSubtitleController(context, handler, null);
+        embedded = new EmbeddedSubtitleController(context, handler, headers);
         embedded.setListener(this::onExtractionStatus);
 
         translation = new TranslationController(context, sync, panel, embedded, handler, this::renderOverlay,
@@ -122,7 +133,7 @@ public class CustomSubtitleController
         ilp.rightMargin = indicatorMargin;
         root.addView(translation.getIndicatorView(), ilp);
 
-        autoSync = new AutoSyncController(context, panel, handler);
+        autoSync = new AutoSyncController(context, panel, handler, headers);
         FrameLayout.LayoutParams alp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         alp.gravity = Gravity.TOP | Gravity.START;

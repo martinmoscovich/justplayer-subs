@@ -1510,7 +1510,8 @@ public class PlayerActivity extends Activity {
 
             // Custom subtitle overlay: takes over external subtitles (parse + render + sync).
             if (customSubtitles != null) customSubtitles.release();
-            customSubtitles = new CustomSubtitleController(this, playerView, player, trackSelector);
+            customSubtitles = new CustomSubtitleController(this, playerView, player, trackSelector,
+                    () -> apiHeaders);
             customSubtitles.onMediaSet(mPrefs.mediaUri, apiAccess && apiSubs.size() > 0 ? apiSubs : null, mPrefs.subtitleUri);
 
             // Intro/recap/ending skip buttons, when the launching app sent segments for this media.

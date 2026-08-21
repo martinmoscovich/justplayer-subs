@@ -65,7 +65,7 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
     public void readCues(String source, int trackIndex, long resumeFromMs,
                          @Nullable ProgressListener onProgress, CueSink sink) throws Exception {
         Uri uri = Uri.parse(source);
-        DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers);
+        DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers, uri);
         Extractor extractor = null;
         try {
             ExtractorInput input = Media3ExtractorSource.openAt(dataSource, uri, 0);
