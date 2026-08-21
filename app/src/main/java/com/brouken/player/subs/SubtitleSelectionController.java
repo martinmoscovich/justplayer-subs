@@ -174,6 +174,12 @@ public class SubtitleSelectionController {
                            @Nullable List<MediaItem.SubtitleConfiguration> apiSubs,
                            @Nullable Uri prefsSubtitleUri) {
         this.mediaUri = mediaUri;
+        // Earliest point at which we know a search is coming. The connection takes ~850ms to open
+        // and the search cannot start until the media hash is ready (~1.4s later), so this fits
+        // entirely inside a window that would otherwise be idle for this host.
+        if (!TextUtils.isEmpty(SubtitleSettings.getApiKey(context, SubtitleSettings.KEY_OPENSUBTITLES))) {
+            OpenSubtitlesHttp.warmUp();
+        }
         manuallySelected = false;
         pendingAutoNoticeId = null;
         notifiedPreferredFound = false;
@@ -228,7 +234,7 @@ public class SubtitleSelectionController {
 
     private String downloadProviderContent(SubtitleOption opt) throws SubtitleError.ProviderError {
         String apiKey = SubtitleSettings.getApiKey(context, SubtitleSettings.KEY_OPENSUBTITLES);
-        SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
+        SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, OpenSubtitlesHttp.client());
         return provider.download(opt.providerRef).getContent();
     }
 
@@ -601,7 +607,7 @@ public class SubtitleSelectionController {
         refresh();
 
         new Thread(() -> {
-            SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, new OkHttpClient());
+            SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, OpenSubtitlesHttp.client());
             // Nuvio's episode title shape is "<Show> - S01E04" with no separate season/episode
             // extra; pulling them out lets the query use OpenSubtitles' structured params instead of
             // relying on its free-text search tolerating the suffix.
