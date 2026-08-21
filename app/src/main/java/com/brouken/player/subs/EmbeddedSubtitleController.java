@@ -8,8 +8,10 @@ import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.Consumer;
 
@@ -58,6 +60,27 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         t.setPriority(Thread.MIN_PRIORITY);
         return t;
     };
+
+    /**
+     * Caches the last few hash results by media URI, for the lifetime of the process rather than this
+     * controller — {@code PlayerActivity.initializePlayer()} tears down and recreates a fresh
+     * {@code CustomSubtitleController} (and so this class) on every {@code onStart()}, including just
+     * returning from the Settings screen. Without this, coming back re-hashed from scratch (~4s) and,
+     * worse, raced the cache-key lookup that resumes a translation in progress: re-selecting the same
+     * track before the hash was ready fell back to the URI-based key (see {@link SubtitleCacheKey}),
+     * found nothing under it — the real progress sat cached under the hash-based key from before — and
+     * started over from scratch. Reported live as "lost my whole translation." Small and bounded: a
+     * convenience for the same video coming right back, not a general-purpose cache, so a stale entry
+     * for a since-changed file at the same URI is an accepted, unlikely edge case rather than something
+     * worth invalidating for.
+     */
+    private static final int HASH_CACHE_CAPACITY = 4;
+    private static final Map<String, String[]> HASH_CACHE =
+            new LinkedHashMap<String, String[]>(HASH_CACHE_CAPACITY, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(Map.Entry<String, String[]> eldest) {
+                    return size() > HASH_CACHE_CAPACITY;
+                }
+            };
 
     /** Extraction-only mode never translates a single entry — a call here is a bug, not a runtime path. */
     private static final TranslationClient NEVER_CALLED = new TranslationClient() {
@@ -135,6 +158,15 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         cachedFile = null;
         videoHash = null;
         if (mediaUri == null) return;
+
+        String[] cachedHashAndSize = HASH_CACHE.get(mediaUri.toString());
+        if (cachedHashAndSize != null) {
+            videoHash = cachedHashAndSize[0];
+            Log.i(TAG, "media hash reused from an earlier hash of this URI this process — no re-read");
+            if (onHashReady != null) onHashReady.accept(cachedHashAndSize[1]);
+            return;
+        }
+
         // Hashing costs two range requests, so it happens off the main thread — and its absence
         // simply means this media runs uncached rather than failing.
         new Thread(() -> {
@@ -144,6 +176,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
             mainHandler.post(() -> {
                 if (!mediaUri.equals(this.mediaUri)) return; // media changed while we hashed
                 videoHash = hashAndSize == null ? null : hashAndSize[0];
+                if (hashAndSize != null) HASH_CACHE.put(mediaUri.toString(), hashAndSize);
                 Log.i(TAG, "media hash " + (videoHash != null ? "ready" : "unavailable — falling back to URI-based cache key")
                         + " after " + elapsedMs + "ms");
                 if (onHashReady != null) {
@@ -299,6 +332,60 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers),
                 mediaUri.toString(), option.embeddedTextIndex, option.language,
                 cachedPrefix, resumeFromMs, THREAD_FACTORY);
+    }
+
+    /**
+     * Large enough that either pass of a position-priority run stays well clear of it — any real
+     * track has orders of magnitude fewer entries. See {@link ExtractingEntrySource}'s {@code startIndex}
+     * javadoc for why the priority pass needs an index range that sorts after the head pass's.
+     *
+     * <p><b>Must stay under 1,000,000.</b> An index round-trips through the LLM as a bare line in the
+     * translation prompt/response, and {@code ChunkValidator}'s {@code INDEX_LINE} pattern only matches
+     * 1-6 digits (confirmed live: a 7-digit offset made every chunk parse as "got=0" and fail, no
+     * matter how much it got split — the response was fine, the validator just never recognized a
+     * single index line in it). 500,000 keeps both halves of the 1-6 digit range roughly symmetric.
+     */
+    private static final int PRIORITY_PASS_INDEX_OFFSET = 500_000;
+
+    /**
+     * A {@link SubtitlePipelineSession.StreamingSourceFactory} for {@code option}'s embedded track,
+     * for a run that will start at {@code runStartAtMs} — used by {@link TranslationController} so a
+     * track that still needs extracting gets translated with position priority (see
+     * {@link SubtitlePipelineSession#runStreamingWithPriority}) instead of always from the start.
+     *
+     * <p>Only ever called after the caller has already ruled out a complete cache hit (that still goes
+     * through the cheap {@link #entrySourceFor}/{@link InMemoryEntrySource} path — running a fully
+     * known list through this two-pass factory would translate it twice). When {@code runStartAtMs > 0}
+     * neither pass resumes from a cached partial (see the accepted v1 limitation on disk persistence
+     * for a position-priority run, {@code PENDING.md}) — the priority pass ({@code fromMs > 0}) is
+     * always a cold read at {@link #PRIORITY_PASS_INDEX_OFFSET}, and the head pass
+     * ({@code fromMs == 0} called as part of that same run) is also cold, at the default index range.
+     * A plain, position-0 run's single {@code create(0L)} call keeps resuming from a cached partial
+     * exactly like {@link #extractingSourceFor} always has.
+     *
+     * @return {@code null} if {@code option} isn't a (non-image) embedded track, or there's no media
+     */
+    @Nullable
+    public SubtitlePipelineSession.StreamingSourceFactory streamingFactoryFor(SubtitleOption option, long runStartAtMs) {
+        if (option == null || option.source != SubtitleOption.Source.EMBEDDED) return null;
+        if (option.imageFormat) return null;
+        if (mediaUri == null) return null;
+
+        boolean positionPriority = runStartAtMs > 0;
+        String uri = mediaUri.toString();
+        int trackIndex = option.embeddedTextIndex;
+        String language = option.language;
+        return fromMs -> {
+            if (fromMs > 0) {
+                return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers),
+                        uri, trackIndex, language, List.of(), fromMs, PRIORITY_PASS_INDEX_OFFSET, THREAD_FACTORY);
+            }
+            if (positionPriority) {
+                return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers),
+                        uri, trackIndex, language, List.of(), 0L, THREAD_FACTORY);
+            }
+            return extractingSourceFor(option);
+        };
     }
 
     public void cancel() {

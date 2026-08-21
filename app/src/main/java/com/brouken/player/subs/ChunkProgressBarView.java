@@ -107,7 +107,8 @@ public class ChunkProgressBarView extends View {
     private final android.graphics.Path clipPath = new android.graphics.Path();
     private final android.graphics.Path playheadTip = new android.graphics.Path();
 
-    // The bar's seven semantic colours. They are the one part of the palette that is never reused
+    // The bar's seven semantic colours (CLOSING has no constant of its own — it blends EXTRACTING and
+    // CLOSED). They are the one part of the palette that is never reused
     // anywhere else in the panel, which is what lets the legend above the bar be read as a key.
     private static final int COLOR_PENDING = SubsTheme.STATUS_PENDING;
     private static final int COLOR_EXTRACTING = SubsTheme.STATUS_EXTRACTING;
@@ -246,8 +247,7 @@ public class ChunkProgressBarView extends View {
             boolean mergesWithNext = next != null
                     && seg.state == SegmentState.DONE && next.state == SegmentState.DONE;
             if (!mergesWithNext && right - left > dp(1)) {
-                canvas.drawLine(right, barTop, right, barBottom,
-                        seg.endEstimated ? dashedBorder() : borderPaint);
+                canvas.drawLine(right, barTop, right, barBottom, borderPaintFor(seg.endEstimated));
             }
 
             if (detailed && seg.label != null) {
@@ -305,11 +305,16 @@ public class ChunkProgressBarView extends View {
             if (a.endMs != b.startMs) continue;
             float x = xFor(a.endMs, total, w);
             boolean above = (i % 2 == 0);
+            // Same solid-vs-dashed rule as the segment divider this leader belongs to (borderPaintFor)
+            // — a solid divider with a dashed leader (or vice versa) reads as the border style
+            // changing partway across the bar, exactly where a run's real segments give way to its
+            // still-estimated tail.
+            Paint leaderPaint = tickLinePaintFor(a.endEstimated);
             if (above) {
-                canvas.drawLine(x, barTop, x, barTop + dp(10), tickLinePaint);
+                canvas.drawLine(x, barTop, x, barTop + dp(10), leaderPaint);
             } else {
                 // Leader below the bar, so a label on the lower row still points at its boundary.
-                canvas.drawLine(x, barBottom, x, barBottom + dp(GAP_DP), tickLinePaint);
+                canvas.drawLine(x, barBottom, x, barBottom + dp(GAP_DP), leaderPaint);
             }
 
             String label = (a.endEstimated ? "~" : "") + formatDuration(a.endMs);
@@ -366,9 +371,25 @@ public class ChunkProgressBarView extends View {
         canvas.restore();
     }
 
-    private Paint dashedBorder() {
-        borderPaint.setPathEffect(new DashPathEffect(new float[]{dp(3), dp(3)}, 0));
+    /** {@code borderPaint} styled for one boundary — explicitly solid or dashed, never left over from
+     *  whatever the previous boundary drawn set it to (a bare {@code borderPaint} reference used to
+     *  silently inherit a dashed effect a prior estimated boundary had set and never cleared). */
+    private Paint borderPaintFor(boolean estimated) {
+        borderPaint.setPathEffect(estimated ? scaledDash() : null);
         return borderPaint;
+    }
+
+    /** {@code tickLinePaint} styled the same solid-vs-dashed way as {@link #borderPaintFor} — the short
+     *  leader stub outside the bar has to match the segment divider it belongs to, or the boundary
+     *  reads as two different styles once the bar has both real and estimated segments on screen. */
+    private Paint tickLinePaintFor(boolean estimated) {
+        tickLinePaint.setPathEffect(estimated ? scaledDash() : null);
+        return tickLinePaint;
+    }
+
+    private DashPathEffect scaledDash() {
+        float d = dp(3);
+        return new DashPathEffect(new float[]{d, d}, 0);
     }
 
     /** Whether a segment's fill is dark enough that ink on it has to be light rather than near-black. */

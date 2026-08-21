@@ -79,8 +79,9 @@ public class SubtitleNoticeView extends LinearLayout {
     }
 
     /**
-     * Shows the bar with one custom action before Dismiss — used for "this came from the cache,
-     * here is how to redo it".
+     * Shows the bar with one custom action — used for "this came from the cache, here is how to
+     * redo it". No separate Dismiss: this is the one thing worth doing, and closing it without doing
+     * it is what the auto-hide timer (or Back) is for.
      */
     public void show(String text, String actionLabel, Runnable action) {
         prepare(text);
@@ -88,13 +89,15 @@ public class SubtitleNoticeView extends LinearLayout {
             hide();
             action.run();
         });
-        addButton("Dismiss", this::hide);
         finish();
     }
 
     /**
-     * Shows the bar. {@code withTranslate} adds the Translate button before Dismiss and starts the
-     * focus on it — it is the action worth taking; Dismiss is the way out.
+     * Shows the bar. {@code withTranslate} adds the Translate button, focused by default — it is the
+     * action worth taking. Without it, there is nothing to take action on and so nothing to focus:
+     * the bar is a passive message, closed only by the auto-hide timer (see {@link #handleKey}, which
+     * stops claiming navigation keys the moment there is no button for them to move between — a bar
+     * with no action has no business taking the D-pad away from playback).
      */
     public void show(String text, boolean withTranslate) {
         prepare(text);
@@ -104,7 +107,6 @@ public class SubtitleNoticeView extends LinearLayout {
                 if (listener != null) listener.onTranslate();
             });
         }
-        addButton("Dismiss", this::hide);
         finish();
     }
 
@@ -135,9 +137,12 @@ public class SubtitleNoticeView extends LinearLayout {
         handler.removeCallbacks(autoHide);
     }
 
-    /** @return true if the bar consumed the key. Non-navigation keys always fall through. */
+    /** @return true if the bar consumed the key. Non-navigation keys always fall through, and so does
+     *  everything else once there is no button on screen — a passive, no-action bar (see the 1-arg
+     *  {@link #show(String, boolean)}) has nothing to move focus between and no business taking the
+     *  D-pad away from playback while it counts down on its own. */
     public boolean handleKey(KeyEvent event) {
-        if (!isShowing()) return false;
+        if (!isShowing() || buttons.isEmpty()) return false;
         int keyCode = event.getKeyCode();
         if (!isNavKey(keyCode)) return false;
         // Claim the whole up/down pair for the keys we act on, or the player would react to the

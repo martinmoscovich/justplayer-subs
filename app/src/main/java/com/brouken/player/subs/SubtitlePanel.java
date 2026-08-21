@@ -57,6 +57,13 @@ public class SubtitlePanel extends FrameLayout
          *  as everything else here: moving the sidebar highlight off Sync counts, same as committing
          *  to it does, since that's already what changes what's rendered. */
         void onLeavingSync();
+        /** The Translate screen just started being shown. If a translation is actively running,
+         *  playback should pause and remember whether it was playing, so {@link #onLeavingTranslate()}
+         *  can restore it. Same "hover previews the screen" firing model as {@link #onLeavingSync()}. */
+        void onEnteringTranslate();
+        /** The Translate screen just stopped being what's shown — mirrors {@link #onLeavingSync()}.
+         *  Restores playback to whatever it was before {@link #onEnteringTranslate()}, if that paused it. */
+        void onLeavingTranslate();
     }
 
     private enum Screen { SELECT, SYNC, TRANSLATE }
@@ -233,7 +240,13 @@ public class SubtitlePanel extends FrameLayout
     }
 
     public void close() {
-        if (screen == Screen.SYNC && callbacks != null) callbacks.onLeavingSync();
+        if (callbacks != null) {
+            if (screen == Screen.SYNC) callbacks.onLeavingSync();
+            if (screen == Screen.TRANSLATE) callbacks.onLeavingTranslate();
+        }
+        // Otherwise this is the stale value the next open() sees, and changeScreen(SELECT) would fire
+        // an unwarranted second onLeaving*() for whatever screen was up when the panel was last closed.
+        screen = Screen.SELECT;
         releaseBack();
         setVisibility(GONE);
     }
@@ -272,11 +285,17 @@ public class SubtitlePanel extends FrameLayout
         super.onDetachedFromWindow();
     }
 
-    /** The one place {@link #screen} is allowed to change — so leaving Sync is never missed
+    /** The one place {@link #screen} is allowed to change — so leaving Sync/Translate is never missed
      *  regardless of which of the three call sites (open, sidebar preview, close) caused it. */
     private void changeScreen(Screen next) {
         if (screen == Screen.SYNC && next != Screen.SYNC && callbacks != null) {
             callbacks.onLeavingSync();
+        }
+        if (screen != Screen.TRANSLATE && next == Screen.TRANSLATE && callbacks != null) {
+            callbacks.onEnteringTranslate();
+        }
+        if (screen == Screen.TRANSLATE && next != Screen.TRANSLATE && callbacks != null) {
+            callbacks.onLeavingTranslate();
         }
         screen = next;
     }

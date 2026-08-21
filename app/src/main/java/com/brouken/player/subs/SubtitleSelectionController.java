@@ -28,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -116,6 +117,23 @@ public class SubtitleSelectionController {
      *  cap on the combined list — see {@link SubtitleProvider#searchByPriority}. */
     private static final int MAX_PROVIDER_RESULTS_PER_GROUP = 12;
 
+    /**
+     * Remembers the last active option's id per media URI, for the lifetime of the process rather than
+     * this controller — mirrors {@code EmbeddedSubtitleController.HASH_CACHE}'s reasoning:
+     * {@code PlayerActivity.initializePlayer()} tears down and recreates this whole controller (so
+     * selection resets to nothing) on every {@code onStart()}, including just returning from Settings.
+     * Without this, coming back required re-picking the subtitle by hand — and worse, a translation in
+     * progress on the embedded track that used to be selected had nothing driving it to get reselected
+     * at all. See {@link #autoSelectOrRestoreLastActive()}.
+     */
+    private static final int LAST_ACTIVE_CACHE_CAPACITY = 4;
+    private static final Map<String, String> LAST_ACTIVE_OPTION_CACHE =
+            new LinkedHashMap<String, String>(LAST_ACTIVE_CACHE_CAPACITY, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+                    return size() > LAST_ACTIVE_CACHE_CAPACITY;
+                }
+            };
+
     private final List<SubtitleOption> externalOptions = new ArrayList<>();
     private final List<SubtitleOption> embeddedOptions = new ArrayList<>();
     private final List<SubtitleOption> providerOptions = new ArrayList<>();
@@ -140,6 +158,7 @@ public class SubtitleSelectionController {
     @Nullable private String mediaBytes;
     @Nullable private SubtitleRetriever externalRetriever;
     @Nullable private SubtitleRetriever providerRetriever;
+    @Nullable private Uri mediaUri;
 
     public SubtitleSelectionController(Context context, ExoPlayer player,
                                        DefaultTrackSelector trackSelector, Listener listener,
@@ -154,6 +173,7 @@ public class SubtitleSelectionController {
     public void onMediaSet(@Nullable Uri mediaUri,
                            @Nullable List<MediaItem.SubtitleConfiguration> apiSubs,
                            @Nullable Uri prefsSubtitleUri) {
+        this.mediaUri = mediaUri;
         manuallySelected = false;
         pendingAutoNoticeId = null;
         notifiedPreferredFound = false;
@@ -170,7 +190,7 @@ public class SubtitleSelectionController {
                     // trigger, not just a list refresh.
                     rebuildEmbeddedOptions(tracks);
                     refresh();
-                    autoSelect();
+                    autoSelectOrRestoreLastActive();
                 }
             };
             player.addListener(tracksListener);
@@ -178,7 +198,7 @@ public class SubtitleSelectionController {
         rebuildEmbeddedOptions(player.getCurrentTracks());
 
         refresh();
-        autoSelect();
+        autoSelectOrRestoreLastActive();
         // The provider search waits for onMediaHash(): matching on the media's hash finds subtitles
         // for this exact release, where a title match cannot tell two of them apart. The hash costs
         // 128 KB and about a second, which is worth it — and onMediaHash() always arrives, with null
@@ -244,6 +264,7 @@ public class SubtitleSelectionController {
         SubtitleOption opt = findOption(id);
         if (opt == null) return;
         selectedId = id;
+        if (mediaUri != null) LAST_ACTIVE_OPTION_CACHE.put(mediaUri.toString(), id);
         if (opt.source == SubtitleOption.Source.EMBEDDED) {
             selectEmbedded(opt);
         } else if (opt.source == SubtitleOption.Source.PROVIDER) {
@@ -289,6 +310,33 @@ public class SubtitleSelectionController {
     }
 
     // --- auto-selection (engine decides; this only maps to and from its model) ---
+
+    /**
+     * Tries {@link #LAST_ACTIVE_OPTION_CACHE} first, falling back to {@link #autoSelect()}'s normal
+     * ranking when there's nothing remembered for this media or it isn't among the candidates yet
+     * (embedded tracks, external subs, and provider results all arrive at different times — this runs
+     * again at each of those points, same as {@link #autoSelect()} already did, so a remembered
+     * provider-sourced pick still gets a chance once its search actually comes back). A successful
+     * restore is treated exactly like a manual pick — {@link #manuallySelected} locks it in — since
+     * from the user's point of view it already was their choice; this is just picking it back up after
+     * the controller got torn down and recreated ({@code PlayerActivity.initializePlayer()}, e.g. on
+     * returning from Settings), not proposing something new to rank.
+     */
+    private void autoSelectOrRestoreLastActive() {
+        if (manuallySelected) return;
+        String rememberedId = mediaUri != null ? LAST_ACTIVE_OPTION_CACHE.get(mediaUri.toString()) : null;
+        if (rememberedId != null && !rememberedId.equals(selectedId)) {
+            SubtitleOption remembered = findOption(rememberedId);
+            if (remembered != null && isCandidate(remembered)) {
+                manuallySelected = true;
+                android.util.Log.i(TAG, "restored last-active selection '" + remembered.label + "' ("
+                        + remembered.source + ", lang=" + remembered.language + ")");
+                applySelection(rememberedId);
+                return;
+            }
+        }
+        autoSelect();
+    }
 
     /**
      * Re-ranks every known option and switches if the winner is not what's playing. Called whenever
@@ -583,8 +631,9 @@ public class SubtitleSelectionController {
         loadingMore = false;
         refresh();
         android.util.Log.i(TAG, "OpenSubtitles: " + providerOptions.size() + " results");
-        // New candidates: a target-language result can outrank whatever is playing right now.
-        autoSelect();
+        // New candidates: a target-language result can outrank whatever is playing right now — or, if
+        // nothing has been selected yet, be the remembered last-active option finally showing up.
+        autoSelectOrRestoreLastActive();
     }
 
     private void onProviderError(Exception e) {

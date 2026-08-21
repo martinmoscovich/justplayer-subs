@@ -26,6 +26,7 @@ import com.brouken.player.subs.ui.SubsTheme;
 import subtitleengine.core.model.SubtitleEntry;
 import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.pipeline.EntrySource;
+import subtitleengine.pipeline.InMemoryEntrySource;
 import subtitleengine.pipeline.SubtitlePipelineSession;
 import subtitleengine.translation.ChunkProgress;
 import subtitleengine.translation.ChunkingConfig;
@@ -166,9 +167,9 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         boolean show = !panelOpen && (showRunning || showTerminal);
 
         TranslationProgress p = lastProgress;
-        ChunkProgressBarView.Model model = (p != null)
-                ? timeline.buildModel(p, session, currentPositionMs)
-                : ChunkProgressBarView.Model.EMPTY;
+        // buildModel handles p == null itself (draws the estimate as freshly PENDING) — needed right
+        // after start(), before the engine's first callback has posted back to lastProgress yet.
+        ChunkProgressBarView.Model model = timeline.buildModel(p, session, currentPositionMs);
         detailedBar.setModel(model);
         lastPositionMs = currentPositionMs;
         lastModel = model;
@@ -285,9 +286,12 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
     /**
      * @param positionMs     current playback position — entries at/after it are prioritized so the
-     *                       user can keep watching without gaps as soon as possible. Only affects an
-     *                       already fully-known source (see {@link SubtitlePipelineSession}'s class
-     *                       javadoc) — ignored for a streaming embedded extraction.
+     *                       user can keep watching without gaps as soon as possible. Applies both to an
+     *                       already fully-known source and to a not-yet-extracted embedded track (see
+     *                       {@link SubtitlePipelineSession}'s class javadoc and
+     *                       {@link SubtitlePipelineSession#runStreamingWithPriority}) — the only case
+     *                       it's ignored for is a complete-cache-hit embedded track, which never reaches
+     *                       the streaming path at all (see the cache check in this method's body).
      * @param videoDurationMs the video's total duration ({@code player.getDuration()}) — used only to
      *                       lay out the chunk progress bar's estimated boundaries before any entry is
      *                       known; the translation itself doesn't need it.
@@ -303,15 +307,36 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
         List<SubtitleEntry> exactEntries = null;
         if (source == null && isExtractableSelected()) {
-            EntrySource entrySource = embedded.entrySourceFor(selectedOption);
-            if (entrySource == null) return; // isExtractableSelected() said yes but embedded disagreed
             pendingSourcePromotion = true;
-            session.setSource(entrySource, selectedOption.language, movieTitle);
+            // A complete cache hit stays on the cheap in-memory path (also picks up today's existing
+            // in-memory priority-pass split via session.start's positionMs below) — running an
+            // already-fully-known list through the position-priority streaming factory would translate
+            // it twice (once per pass). Only a track that still needs reading from the container goes
+            // through the factory, so its priority pass can start at positionMs instead of always 0.
+            SubtitleFile cachedComplete = embedded.peekCache(selectedOption);
+            if (cachedComplete != null) {
+                session.setSource(new InMemoryEntrySource(cachedComplete.getEntries()),
+                        selectedOption.language, movieTitle);
+            } else {
+                SubtitlePipelineSession.StreamingSourceFactory factory =
+                        embedded.streamingFactoryFor(selectedOption, positionMs);
+                if (factory == null) return; // isExtractableSelected() said yes but embedded disagreed
+                session.setSource(factory, selectedOption.language, movieTitle);
+            }
         } else {
             pendingSourcePromotion = false;
             if (source != null) exactEntries = source.getEntries();
         }
         timeline.reset(videoDurationMs, positionMs, exactEntries);
+        // Draw the freshly-reset estimate right now — session.start() reports back to lastProgress
+        // from a worker thread, so without this the bar (and pushState() below, which reads lastModel
+        // for the Progress %/chunk-count text) would sit on whatever it last showed until the next
+        // tick's renderIndicator() picks up that first callback. Ordinarily that's ~100ms
+        // (CustomSubtitleController.POLL_MS); visibly worse if the main thread is busy right around
+        // when a run starts (media hashing, subtitle search, etc.).
+        lastModel = timeline.buildModel(null, session, positionMs);
+        detailedBar.setModel(lastModel);
+        lastPositionMs = positionMs;
 
         session.start(targetLanguage(), positionMs);
         pushState();
@@ -380,6 +405,15 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         return canTranslate();
     }
 
+    /** Whether a translation run is under way — RUNNING or frozen by {@link #pause()}. Used to decide
+     *  whether opening the Translate screen should pause playback (see
+     *  {@code CustomSubtitleController#onEnteringTranslate}) — a finished/idle/failed run has nothing
+     *  competing for attention. */
+    public boolean isActive() {
+        RunStatus status = session.status();
+        return status == RunStatus.RUNNING || status == RunStatus.PAUSED;
+    }
+
     private boolean canTranslate() {
         return reasonUnavailable() == null;
     }
@@ -440,7 +474,6 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
     @Override
     public void onSubtitleUpdated(SubtitleFile current) {
-        timeline.onSubtitleUpdated(current);
         if (pendingSourcePromotion) {
             pendingSourcePromotion = false;
             source = current;
@@ -536,7 +569,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
     private TranslateUiState runningState(ButtonState buttons, @Nullable TranslationProgress p) {
         TranslateUiState.Builder b = TranslateUiState.of(TranslateUiState.Mode.RUNNING, buttons).bar(true);
-        addWatchablePanel(b, "Watchable up to", watchableSubline());
+        addWatchablePanel(b, "Watchable up to", watchableSubline(p));
         b.panel("Progress", ChunkTimelineTracker.percentDone(lastModel) + "%", progressSubline(p), false);
         addCostPanel(b, "Spent so far", p, true);
         addLegend(b);
@@ -598,7 +631,13 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     // --- the pieces each state is assembled from ---
 
     private void addWatchablePanel(TranslateUiState.Builder b, String label, @Nullable String sub) {
-        b.panel(label, formatDuration(watchableUntilMs()), sub, true);
+        // watchableUntilMs() floors at the playhead itself (see its javadoc) — reads fine once
+        // something is actually ready ahead of you, but showing that same floor value as if it were a
+        // real boundary reads as "everything up to right now is watchable" before anything is. "-"
+        // says plainly that nothing is ready yet, same moment watchableSubline() already says so.
+        long until = watchableUntilMs();
+        String value = until > lastPositionMs ? formatDuration(until) : "-";
+        b.panel(label, value, sub, true);
     }
 
     /**
@@ -610,11 +649,21 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         return session.watchableUntilMs(lastPositionMs);
     }
 
-    /** How much of that is still ahead of the playhead. Hits zero exactly when playback catches up. */
+    /**
+     * How much of that is still ahead of the playhead. Hits zero exactly when playback catches up —
+     * but that reads two different ways depending on whether anything has been produced at all yet:
+     * fresh off {@code start()}, "caught up" implies something was ahead and got left behind, which
+     * isn't true the first few seconds of a run. {@link TranslationProgress#getCompletedChunks()} is
+     * 0 only until the very first chunk (of either pass, for a position-priority run) closes anywhere
+     * — by the time one has, the priority pass (always first) has necessarily produced something at
+     * or ahead of wherever it started, so "caught up" becomes an honest description again.
+     */
     @Nullable
-    private String watchableSubline() {
+    private String watchableSubline(@Nullable TranslationProgress p) {
         long left = watchableUntilMs() - lastPositionMs;
-        if (left <= 0) return "playback has caught up";
+        if (left <= 0) {
+            return (p == null || p.getCompletedChunks() == 0) ? "nothing translated yet" : "playback has caught up";
+        }
         return formatDuration(left) + " left from here";
     }
 
@@ -622,9 +671,10 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     private String progressSubline(@Nullable TranslationProgress p) {
         if (p == null) return null;
         StringBuilder sb = new StringBuilder();
-        if (p.getTotalChunks() > 0) {
+        int total = estimatedTotalChunks(p);
+        if (total > 0) {
             sb.append(p.getCompletedChunks()).append(" of ")
-                    .append(p.isStreaming() ? "~" : "").append(p.getTotalChunks()).append(" chunks");
+                    .append(p.isStreaming() ? "~" : "").append(total).append(" chunks");
         }
         // Not a ternary: mixing a primitive long with a nullable Long makes javac unbox the null
         // branch, so "no ETA yet" crashed instead of simply not being shown.
@@ -645,8 +695,23 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
     @Nullable
     private String chunkCountSubline(@Nullable TranslationProgress p) {
-        if (p == null || p.getTotalChunks() <= 0) return null;
-        return p.getCompletedChunks() + " of " + p.getTotalChunks() + " chunks";
+        if (p == null) return null;
+        int total = estimatedTotalChunks(p);
+        if (total <= 0) return null;
+        return p.getCompletedChunks() + " of " + (p.isStreaming() ? "~" : "") + total + " chunks";
+    }
+
+    /**
+     * {@link TranslationProgress#getTotalChunks()} is a live count of chunks actually dispatched so
+     * far in a streaming run — not a projection — so early on it reads as "that's everything" (e.g.
+     * "1 of ~1") while the segmented bar next to it already draws several pending segments from
+     * {@link ChunkTimelineTracker}'s duration-based estimate. Reconciles the two: for a streaming run,
+     * never show a total lower than however many segments {@link #lastModel} (kept fresh every tick by
+     * {@link #renderIndicator}) currently draws.
+     */
+    private int estimatedTotalChunks(TranslationProgress p) {
+        if (!p.isStreaming()) return p.getTotalChunks();
+        return Math.max(p.getTotalChunks(), lastModel.segments.size());
     }
 
     private void addCostPanel(TranslateUiState.Builder b, String label, @Nullable TranslationProgress p,

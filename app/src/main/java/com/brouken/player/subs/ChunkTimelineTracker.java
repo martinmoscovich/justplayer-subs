@@ -9,9 +9,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
 
 import subtitleengine.core.model.SubtitleEntry;
-import subtitleengine.core.model.SubtitleFile;
 import subtitleengine.pipeline.SubtitlePipelineSession;
 import subtitleengine.translation.ChunkPriority;
 import subtitleengine.translation.ChunkProgress;
@@ -22,38 +22,80 @@ import subtitleengine.translation.SubtitleChunker;
 import subtitleengine.translation.TranslationProgress;
 
 /**
- * Builds {@link ChunkProgressBarView.Model} snapshots from {@link TranslationProgress} events plus
- * the growing {@link SubtitleFile} — the adapter between engine state and the dumb renderer. All of
- * this is presentation logic: it reshapes state the engine already computed into drawable segments,
- * it never decides anything about chunking or translation itself (see the design plan). One instance
- * per {@link TranslationController}, reset at the start of every run.
+ * Builds {@link ChunkProgressBarView.Model} snapshots from {@link TranslationProgress} events — the
+ * adapter between engine state and the dumb renderer. All of this is presentation logic: it reshapes
+ * state the engine already computed into drawable segments, it never decides anything about chunking
+ * or translation itself (see the design plan). One instance per {@link TranslationController}, reset
+ * at the start of every run.
+ *
+ * <p><b>Identity, not position.</b> A chunk is identified by {@code (zone, pass-local index)} — the
+ * same index {@link ChunkProgress#getIndex()}/{@link SubtitleChunk#getIndex()} already assign,
+ * sequentially in content order, never reused within a pass. Known chunks live in a
+ * {@link Map} keyed by that index ({@link #backgroundReal}/{@link #priorityReal}), never in a flat
+ * list mutated by position — so the drawable segment list (built fresh in {@link #buildBoundariesFor}
+ * on every {@link #buildModel} call, never persisted across ticks) can grow or shrink from tick to
+ * tick as real chunks arrive, without anything holding a stale reference to "segment N". A real
+ * chunk's range comes straight off {@link ChunkProgress#getStartMs()}/{@link ChunkProgress#getEndMs()}
+ * — read by the engine off the actual chunk at dispatch time — never by cross-referencing SRT indices
+ * against a locally-held copy of the subtitle file, which used to lag for as long as a chunk was in
+ * flight (see {@link #recordReal}'s javadoc).
  */
 final class ChunkTimelineTracker {
 
+    // Plain classes, not records: this module targets Java 8 (no android.javaCompile toolchain bump),
+    // unlike subtitle-engine, which is plain JVM and can use records freely (see SubtitleChunker's
+    // ChunkLimits).
     private static final class Boundary {
-        long ms;
-        boolean estimated;
-        Boundary(long ms, boolean estimated) { this.ms = ms; this.estimated = estimated; }
+        private final long ms;
+        private final boolean estimated;
+        private final boolean failed;
+        Boundary(long ms, boolean estimated, boolean failed) {
+            this.ms = ms;
+            this.estimated = estimated;
+            this.failed = failed;
+        }
+        long ms() { return ms; }
+        boolean estimated() { return estimated; }
+        boolean failed() { return failed; }
+    }
+
+    /** A chunk whose real timing is known — either because it started/closed for real (streaming), or
+     *  because the whole source was known upfront and chunked exactly (in-memory). */
+    private static final class RealChunk {
+        private final long startMs;
+        private final long endMs;
+        private final boolean failed;
+        RealChunk(long startMs, long endMs, boolean failed) {
+            this.startMs = startMs;
+            this.endMs = endMs;
+            this.failed = failed;
+        }
+        long startMs() { return startMs; }
+        long endMs() { return endMs; }
+        boolean failed() { return failed; }
     }
 
     private final ChunkingConfig chunkingConfig;
 
-    /** Lower-priority pass over [0, startAtMs) — only non-empty for a position-priority in-memory run. */
-    private List<Boundary> backgroundBoundaries = List.of();
-    /** The pass actually being watched, over [startAtMs, totalDurationMs). */
-    private List<Boundary> priorityBoundaries = List.of();
+    /** Known chunks of the lower-priority background/head pass, [0, startAtMs) — keyed by pass-local
+     *  chunk index. Only ever populated for a position-priority run. */
+    private final Map<Integer, RealChunk> backgroundReal = new TreeMap<>();
+    /** Known chunks of the pass actually being watched, [startAtMs, totalDurationMs). */
+    private final Map<Integer, RealChunk> priorityReal = new TreeMap<>();
     private long startAtMs;
     private long totalDurationMs;
-    @Nullable private SubtitleFile currentFile;
+    /** Whether {@link #reset} got a fully-known entry list — the priority zone's urgent-chunk count
+     *  differs between an in-memory position-priority run (always 1, {@link SubtitlePipelineSession
+     *  #runInMemory}) and a streaming one ({@link SubtitlePipelineSession#PRIORITY_PASS_URGENT_CHUNK_COUNT}). */
+    private boolean isExact;
 
     // Soft translation-progress heuristic: keyed by "firstEntry-lastEntry" (unique within a run).
     private final Map<String, Long> chunkStartedAtRealMs = new LinkedHashMap<>();
     private final List<Long> completedChunkDurationsMs = new ArrayList<>();
 
-    // Failed-range detection: diffing activeChunks tick to tick — the engine never exposes a
-    // per-chunk-index failed flag directly, only "the most recently closed chunk failed".
+    // Diffing activeChunks tick to tick is how a chunk's real range becomes known — the engine only
+    // ever hands out a snapshot of what's active right now, never a per-index history.
     private Map<Integer, ChunkProgress> previousActiveChunks = Map.of();
-    private final List<long[]> failedRangesMs = new ArrayList<>();
 
     ChunkTimelineTracker(ChunkingConfig chunkingConfig) {
         this.chunkingConfig = chunkingConfig;
@@ -61,129 +103,176 @@ final class ChunkTimelineTracker {
 
     /**
      * Called once when a run starts, before any progress event. {@code exactEntries} non-null means
-     * the source is already fully known — used for the exact pre-pass instead of an estimate; only
-     * applies when {@code startAtMs <= 0} (see the design plan's "accepted limitation" for
-     * position-priority runs, which always get the estimated-and-corrected treatment).
+     * the source is already fully known — used to chunk both zones exactly, right now, instead of
+     * estimating and correcting later (see {@link #populateExact}).
      */
     void reset(long totalDurationMs, long startAtMs, @Nullable List<SubtitleEntry> exactEntries) {
         this.totalDurationMs = totalDurationMs;
         this.startAtMs = Math.max(0L, startAtMs);
-        this.currentFile = null;
+        this.isExact = exactEntries != null;
         chunkStartedAtRealMs.clear();
         completedChunkDurationsMs.clear();
         previousActiveChunks = Map.of();
-        failedRangesMs.clear();
-        backgroundBoundaries = List.of();
-        priorityBoundaries = List.of();
+        backgroundReal.clear();
+        priorityReal.clear();
 
-        if (totalDurationMs <= 0) return;
+        if (totalDurationMs <= 0 || exactEntries == null || exactEntries.isEmpty()) return;
+        populateExact(exactEntries);
+    }
 
-        if (exactEntries != null && this.startAtMs <= 0) {
-            List<Boundary> exact = new ArrayList<>();
-            for (SubtitleChunk c : new SubtitleChunker(chunkingConfig).chunk(exactEntries, ChunkPriority.URGENT)) {
-                List<SubtitleEntry> payload = c.getEntries();
-                exact.add(new Boundary(payload.get(payload.size() - 1).getEndMs(), false));
-            }
-            if (!exact.isEmpty()) exact.get(exact.size() - 1).ms = totalDurationMs;
-            priorityBoundaries = exact;
+    /**
+     * Chunks the already-known {@code exactEntries} right now, the same way the engine actually will
+     * ({@link SubtitlePipelineSession#runInMemory} mirrored via {@link #entryIndexForMs}/
+     * {@link #filterRange} — private there, small enough to duplicate rather than widen that class's
+     * visibility, same call the engine itself already makes for its own private mirror of
+     * {@code SubtitleTranslator}'s helpers) — so both zones of an in-memory run, position-priority or
+     * not, are exact from the very first frame. No estimated tail, ever, for this case.
+     */
+    private void populateExact(List<SubtitleEntry> exactEntries) {
+        int lastBeforeIndex = startAtMs > 0 ? entryIndexForMs(exactEntries, startAtMs) : 0;
+        if (lastBeforeIndex <= 0) {
+            populateRealFrom(new SubtitleChunker(chunkingConfig).chunk(exactEntries, ChunkPriority.URGENT), priorityReal);
             return;
         }
+        List<SubtitleEntry> priority = filterRange(exactEntries, lastBeforeIndex + 1, null);
+        List<SubtitleEntry> head = filterRange(exactEntries, null, lastBeforeIndex);
+        populateRealFrom(new SubtitleChunker(chunkingConfig).chunk(priority, ChunkPriority.URGENT), priorityReal);
+        populateRealFrom(new SubtitleChunker(chunkingConfig).chunk(head, ChunkPriority.BULK), backgroundReal);
+    }
 
-        if (this.startAtMs > 0) {
-            List<Boundary> bg = new ArrayList<>();
-            for (long ms : chunkingConfig.estimateBoundariesMs(this.startAtMs, 0L)) bg.add(new Boundary(ms, true));
-            backgroundBoundaries = bg;
+    private static void populateRealFrom(List<SubtitleChunk> chunks, Map<Integer, RealChunk> into) {
+        for (SubtitleChunk c : chunks) {
+            List<SubtitleEntry> payload = c.getEntries();
+            into.put(c.getIndex(), new RealChunk(payload.get(0).getStartMs(),
+                    payload.get(payload.size() - 1).getEndMs(), false));
         }
-        List<Boundary> pr = new ArrayList<>();
-        for (long ms : chunkingConfig.estimateBoundariesMs(totalDurationMs, this.startAtMs)) pr.add(new Boundary(ms, true));
-        priorityBoundaries = pr;
     }
 
-    void onSubtitleUpdated(SubtitleFile current) {
-        this.currentFile = current;
-    }
-
-    /** Called on every progress event — corrects estimated boundaries as chunks close, detects failures. */
+    /** Called on every progress event — records real chunk ranges as they become known, detects failures. */
     void onProgress(TranslationProgress progress) {
         Map<Integer, ChunkProgress> active = new LinkedHashMap<>();
         for (ChunkProgress cp : progress.getActiveChunks()) active.put(cp.getIndex(), cp);
 
-        // Diff against last tick: a chunk that was active and no longer is either succeeded or failed.
-        // Index alone can repeat across passes (each pass's chunker restarts at 0), but the two passes
-        // never run concurrently (runInMemory finishes the priority pass before starting the background
-        // one), so there is never a live collision at any single tick.
+        // A chunk that was active last tick and no longer is either succeeded or failed. Index alone
+        // can repeat across passes (each pass's chunker restarts at 0), but the two passes never run
+        // concurrently (a position-priority run's background pass only starts once the priority pass's
+        // runPass — including every in-flight future — has returned), so there is never a live
+        // collision between passes at any single tick.
         for (Map.Entry<Integer, ChunkProgress> e : previousActiveChunks.entrySet()) {
             if (active.containsKey(e.getKey())) continue;
             ChunkProgress closed = e.getValue();
             String key = closed.getFirstEntry() + "-" + closed.getLastEntry();
             Long startedAt = chunkStartedAtRealMs.remove(key);
-            if (progress.isLastChunkFailed()) {
-                long[] range = realRangeFor(closed.getFirstEntry(), closed.getLastEntry());
-                if (range != null) failedRangesMs.add(range);
-            } else {
-                if (startedAt != null) completedChunkDurationsMs.add(System.currentTimeMillis() - startedAt);
-                correctBoundaryFor(closed);
-            }
+            boolean failed = progress.isLastChunkFailed();
+            if (!failed && startedAt != null) completedChunkDurationsMs.add(System.currentTimeMillis() - startedAt);
+            recordReal(closed, failed);
         }
-        for (Map.Entry<Integer, ChunkProgress> e : active.entrySet()) {
-            String key = e.getValue().getFirstEntry() + "-" + e.getValue().getLastEntry();
+        for (ChunkProgress cp : active.values()) {
+            String key = cp.getFirstEntry() + "-" + cp.getLastEntry();
             chunkStartedAtRealMs.putIfAbsent(key, System.currentTimeMillis());
+            // Its real range is known the instant it starts (see recordReal's javadoc) — recording it
+            // now, not just at close, is what lets a segment show TRANSLATING for a chunk's whole time
+            // in flight instead of only once it finishes.
+            recordReal(cp, false);
         }
         previousActiveChunks = active;
     }
 
-    private void correctBoundaryFor(ChunkProgress closed) {
-        long[] range = realRangeFor(closed.getFirstEntry(), closed.getLastEntry());
-        if (range == null) return;
-        long realEndMs = range[1];
-        if (realEndMs < startAtMs) {
-            backgroundBoundaries = correctList(backgroundBoundaries, realEndMs, startAtMs);
-        } else {
-            priorityBoundaries = correctList(priorityBoundaries, realEndMs, totalDurationMs);
-        }
+    /**
+     * Records {@code chunk}'s real range into whichever zone it geometrically belongs to.
+     * {@link ChunkProgress#getStartMs()}/{@link ChunkProgress#getEndMs()} are read by the engine
+     * straight off the real {@link subtitleengine.translation.SubtitleChunk} at dispatch time — always
+     * present, never dependent on a locally-held copy of the subtitle file catching up (see that
+     * javadoc for why cross-referencing entry indices against one used to fail silently for as long as
+     * a chunk was in flight).
+     */
+    private void recordReal(ChunkProgress chunk, boolean failed) {
+        RealChunk rc = new RealChunk(chunk.getStartMs(), chunk.getEndMs(), failed);
+        // A chunk belongs to the background/head zone iff its own start is < startAtMs — the same axis
+        // SubtitlePipelineSession.runPass uses to admit entries into that pass (entry.getStartMs() <
+        // endAtMs), so this is exact by construction, not a heuristic. A cue can run long enough that
+        // its *end* crosses startAtMs while still unambiguously belonging to the background pass by
+        // start — testing the end instead (an earlier version of this class did) misrouted exactly
+        // that chunk into the wrong zone's map.
+        if (chunk.getStartMs() < startAtMs) backgroundReal.put(chunk.getIndex(), rc);
+        else priorityReal.put(chunk.getIndex(), rc);
     }
 
-    /** Replaces the nearest estimated boundary with {@code realEndMs} and re-estimates everything
-     *  after it up to {@code zoneEndMs}, so later estimates stay consistent with the new known point. */
-    private List<Boundary> correctList(List<Boundary> list, long realEndMs, long zoneEndMs) {
-        for (int i = 0; i < list.size(); i++) {
-            if (!list.get(i).estimated) continue;
-            List<Boundary> merged = new ArrayList<>(list.subList(0, i));
-            merged.add(new Boundary(realEndMs, false));
-            for (long ms : chunkingConfig.estimateBoundariesMs(zoneEndMs, realEndMs)) {
-                merged.add(new Boundary(ms, true));
-            }
-            return merged;
-        }
-        return list;
-    }
-
-    @Nullable
-    private long[] realRangeFor(int firstEntry, int lastEntry) {
-        if (currentFile == null) return null;
-        long startMs = -1, endMs = -1;
-        for (SubtitleEntry e : currentFile.getEntries()) {
-            if (e.getIndex() == firstEntry) startMs = e.getStartMs();
-            if (e.getIndex() == lastEntry) { endMs = e.getEndMs(); break; }
-        }
-        return (startMs >= 0 && endMs >= 0) ? new long[]{startMs, endMs} : null;
-    }
-
-    /** Builds the drawable model for this tick, for {@code currentPositionMs} (the live playhead). */
-    ChunkProgressBarView.Model buildModel(TranslationProgress progress, SubtitlePipelineSession session,
+    /**
+     * Builds the drawable model for this tick, for {@code currentPositionMs} (the live playhead).
+     * Segments are rebuilt fresh every call from {@link #backgroundReal}/{@link #priorityReal} plus a
+     * re-estimated tail for whatever hasn't closed yet — never a persisted list corrected in place, so
+     * a real chunk spanning more or less than a naive per-slot estimate simply produces however many
+     * real segments the map holds, with no leftover slot to reconcile.
+     */
+    ChunkProgressBarView.Model buildModel(@Nullable TranslationProgress progress, SubtitlePipelineSession session,
                                           long currentPositionMs) {
-        if (totalDurationMs <= 0 || (backgroundBoundaries.isEmpty() && priorityBoundaries.isEmpty())) {
-            return ChunkProgressBarView.Model.EMPTY;
-        }
+        if (totalDurationMs <= 0) return ChunkProgressBarView.Model.EMPTY;
+
+        // The background/head pass is always ChunkPriority.BULK — never urgent — regardless of where
+        // its zone starts; the priority pass's urgent count differs by run kind (see isExact's javadoc).
+        int priorityUrgentChunkCount = (startAtMs <= 0 || isExact)
+                ? 1 : SubtitlePipelineSession.PRIORITY_PASS_URGENT_CHUNK_COUNT;
+        List<Boundary> background = buildBoundariesFor(backgroundReal, 0L, startAtMs, 0, isExact);
+        List<Boundary> priority = buildBoundariesFor(priorityReal, startAtMs, totalDurationMs, priorityUrgentChunkCount, isExact);
+        if (background.isEmpty() && priority.isEmpty()) return ChunkProgressBarView.Model.EMPTY;
 
         Map<Integer, ChunkProgress> active = new LinkedHashMap<>();
-        for (ChunkProgress cp : progress.getActiveChunks()) active.put(cp.getIndex(), cp);
+        if (progress != null) {
+            for (ChunkProgress cp : progress.getActiveChunks()) active.put(cp.getIndex(), cp);
+        }
 
         List<ChunkProgressBarView.Segment> segments = new ArrayList<>();
-        appendSegments(segments, backgroundBoundaries, 0L, true, active, progress, session);
-        appendSegments(segments, priorityBoundaries, startAtMs, false, active, progress, session);
+        appendSegments(segments, background, 0L, true, active, progress, session);
+        appendSegments(segments, priority, startAtMs, false, active, progress, session);
 
         return new ChunkProgressBarView.Model(segments, totalDurationMs, currentPositionMs);
+    }
+
+    /**
+     * Boundaries for one zone: a real boundary (solid) for every chunk already known, in index order
+     * (a {@link TreeMap} — content order, since a pass's chunk indices are assigned sequentially as
+     * chunks close), followed by an estimated tail (dashed) for whatever's left. The tail's urgent
+     * count only subtracts chunks already known ({@code real.size()}), which is safe because a chunk
+     * is first learned about when it *starts* (the common path in {@link #onProgress}, only falling
+     * back to close-time when its entries hadn't reached {@link #currentFile} yet) and starts always
+     * arrive in index order: the chunk executor is a fixed-thread-pool with a FIFO queue, so a free
+     * worker always picks up the oldest-dispatched (i.e. earliest-content) chunk first, even though
+     * *closes* can land out of order once several chunks are translating in parallel.
+     *
+     * <p>{@code complete} (true only for an exact/in-memory zone, see {@link #isExact}) skips the
+     * estimated tail entirely, regardless of {@code cursor}: real content almost never reaches exactly
+     * to the zone's true end (trailing silence with no cue), and a streaming zone's naive estimate
+     * always ends exactly at {@code zoneEnd} by construction — so for either kind of zone, appending an
+     * estimate once every real chunk is already known would only ever add a spurious sliver segment,
+     * never real information. The final boundary is instead always clamped to {@code zoneEnd} — a
+     * no-op whenever a list already ends there. A {@code complete} zone with no real chunks at all
+     * (genuinely no subtitle content in it) still gets a single non-estimated boundary spanning the
+     * whole zone: knowing for certain there's nothing there is real information, not a guess, and the
+     * bar should still visually cover the full zone either way.
+     */
+    private List<Boundary> buildBoundariesFor(Map<Integer, RealChunk> real, long zoneStart, long zoneEnd,
+                                              int urgentChunksInZone, boolean complete) {
+        if (zoneEnd <= zoneStart) return List.of();
+        List<Boundary> out = new ArrayList<>();
+        long cursor = zoneStart;
+        for (RealChunk rc : real.values()) {
+            out.add(new Boundary(rc.endMs(), false, rc.failed()));
+            cursor = rc.endMs();
+        }
+        if (!complete && cursor < zoneEnd) {
+            int remainingUrgent = Math.max(0, urgentChunksInZone - real.size());
+            for (long ms : chunkingConfig.estimateBoundariesMs(zoneEnd, cursor, remainingUrgent)) {
+                out.add(new Boundary(ms, true, false));
+            }
+        }
+        if (out.isEmpty()) {
+            out.add(new Boundary(zoneEnd, false, false));
+        } else {
+            Boundary last = out.get(out.size() - 1);
+            if (last.ms() != zoneEnd) out.set(out.size() - 1, new Boundary(zoneEnd, last.estimated(), last.failed()));
+        }
+        return out;
     }
 
     /**
@@ -205,51 +294,72 @@ final class ChunkTimelineTracker {
 
     private void appendSegments(List<ChunkProgressBarView.Segment> out, List<Boundary> list, long zoneStart,
                                 boolean backgroundPass, Map<Integer, ChunkProgress> active,
-                                TranslationProgress progress, SubtitlePipelineSession session) {
+                                @Nullable TranslationProgress progress, SubtitlePipelineSession session) {
         long start = zoneStart;
         for (Boundary b : list) {
-            long end = b.ms;
+            long end = b.ms();
             if (end <= start) { start = end; continue; }
-            out.add(buildSegment(start, end, b.estimated, backgroundPass, active, progress, session));
+            out.add(progress == null
+                    ? new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.PENDING,
+                            b.estimated(), backgroundPass, 0f, null)
+                    : buildSegment(start, end, b.estimated(), b.failed(), backgroundPass, active, progress, session));
             start = end;
         }
     }
 
-    private ChunkProgressBarView.Segment buildSegment(long start, long end, boolean endEstimated,
+    private ChunkProgressBarView.Segment buildSegment(long start, long end, boolean endEstimated, boolean failed,
                                                        boolean backgroundPass, Map<Integer, ChunkProgress> active,
                                                        TranslationProgress progress, SubtitlePipelineSession session) {
-        for (long[] failed : failedRangesMs) {
-            if (overlaps(start, end, failed[0], failed[1])) {
-                return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.FAILED,
-                        endEstimated, backgroundPass, 0f, null);
-            }
+        if (failed) {
+            return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.FAILED,
+                    endEstimated, backgroundPass, 0f, null);
         }
         // A finished run has nothing left pending, no matter what the boundary bookkeeping still
-        // thinks — the real chunker can (and often does) close a zone in fewer, differently-sized
-        // chunks than the naive duration-based estimate projected, leaving trailing estimated
-        // segments with no real chunk left to correct them. Once DONE, every non-failed segment is
-        // done by definition.
+        // thinks — belt-and-suspenders: every real chunk records its own range as soon as it's known
+        // (see recordReal), so by DONE the maps should already fully cover both zones with no
+        // estimated tail left — but this is the cheap fallback if some edge case ever left one anyway.
         if (progress.getStatus() == RunStatus.DONE) {
             return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.DONE,
                     endEstimated, backgroundPass, 0f, null);
         }
-        // Translated already? Ask the session fresh, from this segment's own start — never stale,
-        // and correctly handles disjoint translated regions (priority pass vs. background pass).
-        if (session.watchableUntilMs(start) >= end) {
+        // Translated already? A direct, range-scoped question — session.isRangeReady(start, end) says
+        // yes only once every entry actually inside [start, end) is done, regardless of what came
+        // before it, after it, or which pass (priority or background) reached it first.
+        if (session.isRangeReady(start, end)) {
             return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.DONE,
                     endEstimated, backgroundPass, 0f, null);
         }
         for (ChunkProgress cp : active.values()) {
-            long[] range = realRangeFor(cp.getFirstEntry(), cp.getLastEntry());
-            if (range != null && overlaps(start, end, range[0], range[1])) {
+            if (overlaps(start, end, cp.getStartMs(), cp.getEndMs())) {
                 return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.TRANSLATING,
                         endEstimated, backgroundPass, 0f, softProgressLabel(cp));
             }
         }
+        // A known (real, not estimated) boundary that isn't failed/done/translating is a chunk that's
+        // already extracted and chunked, just waiting its turn (maxConcurrency, or the executor queue)
+        // — CLOSED, not PENDING (see UI-SUBS.html: PENDING is "hasn't been touched", CLOSED is "ready
+        // to translate").
+        if (!endEstimated) {
+            return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.CLOSED,
+                    endEstimated, backgroundPass, 0f, null);
+        }
         if (progress.isStreaming()) {
             long extracted = progress.getExtractedContentMs();
-            if (start <= extracted) {
+            // A single scalar can't unambiguously locate the frontier across two disjoint zones — once
+            // a position-priority run's priority pass has read anything, `extracted` sits somewhere at
+            // or past startAtMs, which numerically satisfies "start <= extracted" for every earlier
+            // background-zone segment too, even though the background pass (which runs strictly after
+            // the priority one) hasn't even started yet. Bound to whichever zone `extracted` is
+            // actually reporting progress for.
+            boolean extractedIsInThisZone = backgroundPass ? extracted <= startAtMs : extracted >= startAtMs;
+            if (extractedIsInThisZone && start <= extracted) {
                 if (extracted >= end) {
+                    // Extraction has read past this segment's *estimated* end (a guess based on target
+                    // duration), but no real chunk has closed here yet — the chunker is still extending
+                    // past the target, searching for a good natural pause (or the hard maxChunkMs cap)
+                    // to actually cut at. That search is what CLOSING means — distinct from CLOSED,
+                    // which means the real chunk boundary is already known (see the !endEstimated
+                    // branch above) and it's merely waiting its turn to translate.
                     return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.CLOSING,
                             endEstimated, backgroundPass, 0f, null);
                 }
@@ -330,5 +440,28 @@ final class ChunkTimelineTracker {
 
     private static boolean overlaps(long aStart, long aEnd, long bStart, long bEnd) {
         return aStart < bEnd && bStart < aEnd;
+    }
+
+    /** Mirrors {@code SubtitlePipelineSession.entryIndexForMs} (private there) — last SRT index whose
+     *  startMs < ms — so the in-memory exact preview splits {@code exactEntries} exactly the way
+     *  {@code runInMemory} will. */
+    private static int entryIndexForMs(List<SubtitleEntry> entries, long ms) {
+        int lastIndex = 0;
+        for (SubtitleEntry entry : entries) {
+            if (entry.getStartMs() < ms) lastIndex = entry.getIndex();
+            else break;
+        }
+        return lastIndex;
+    }
+
+    /** Mirrors {@code SubtitlePipelineSession.filterRange} (private there). */
+    private static List<SubtitleEntry> filterRange(List<SubtitleEntry> entries, Integer firstEntry, Integer lastEntry) {
+        List<SubtitleEntry> result = new ArrayList<>();
+        for (SubtitleEntry e : entries) {
+            if (firstEntry != null && e.getIndex() < firstEntry) continue;
+            if (lastEntry != null && e.getIndex() > lastEntry) break;
+            result.add(e);
+        }
+        return result;
     }
 }

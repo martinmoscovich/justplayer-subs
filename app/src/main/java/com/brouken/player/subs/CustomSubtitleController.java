@@ -250,6 +250,7 @@ public class CustomSubtitleController
      */
     @Override public void onStartTranslate() {
         translation.start(currentPositionMs(), player != null ? player.getDuration() : 0L);
+        pauseForActiveTranslateRun();
     }
 
     @Override public void onCancelTranslate() { translation.cancel(); }
@@ -269,10 +270,12 @@ public class CustomSubtitleController
 
     @Override public void onTranslateAgain() {
         translation.translateAgain(currentPositionMs(), player != null ? player.getDuration() : 0L);
+        pauseForActiveTranslateRun();
     }
 
     @Override public void onRetryMissing() {
         translation.retryMissing(currentPositionMs(), player != null ? player.getDuration() : 0L);
+        pauseForActiveTranslateRun();
     }
 
     @Override public void onStartAutoSync(boolean fromHere) {
@@ -372,6 +375,45 @@ public class CustomSubtitleController
             cache.putSyncState(key, current);
         }
         selection.refresh(); // "Synced" chip
+    }
+
+    /** Set by {@link #pauseForActiveTranslateRun()} only when it actually paused playback for this
+     *  reason — {@code null} otherwise, so {@link #onLeavingTranslate()} knows whether it has anything
+     *  to restore (and never resumes playback the user paused some other way). */
+    @Nullable private Boolean wasPlayingBeforeTranslatePause;
+
+    /**
+     * Pauses and remembers the current play state, but only the first time it's asked to for a given
+     * Translate-screen visit — {@link #onEnteringTranslate()} resets the tracking to "not yet done" on
+     * every entry, and this is a no-op once it's already non-null. Without that guard, pressing
+     * Translate/Translate again/Retry after {@link #onEnteringTranslate()} had already paused would
+     * re-snapshot {@code player.isPlaying()} as {@code false} (we're already paused from the first
+     * call) and silently forget that playback should resume to <em>playing</em> on
+     * {@link #onLeavingTranslate()}.
+     */
+    private void pauseForActiveTranslateRun() {
+        if (player == null || wasPlayingBeforeTranslatePause != null || !translation.isActive()) return;
+        wasPlayingBeforeTranslatePause = player.isPlaying();
+        if (player.isPlaying()) player.pause();
+    }
+
+    /**
+     * The Translate screen just started being shown (see {@link SubtitlePanel.Callbacks#onEnteringTranslate}).
+     * Pauses only while a translation run is already in flight when the screen opens — starting one
+     * from here (see {@link #onStartTranslate()} and friends) pauses separately, once it actually goes
+     * RUNNING.
+     */
+    @Override public void onEnteringTranslate() {
+        wasPlayingBeforeTranslatePause = null;
+        pauseForActiveTranslateRun();
+    }
+
+    /** The Translate screen just stopped being shown — restores whatever paused playback for this
+     *  reason, whether that was {@link #onEnteringTranslate()} or a later {@link #pauseForActiveTranslateRun()}. */
+    @Override public void onLeavingTranslate() {
+        Boolean wasPlaying = wasPlayingBeforeTranslatePause;
+        wasPlayingBeforeTranslatePause = null;
+        if (wasPlaying != null && wasPlaying && player != null) player.play();
     }
 
     // --- SubtitleSelectionController.Listener ---

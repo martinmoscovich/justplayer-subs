@@ -170,6 +170,11 @@ public class PlayerActivity extends Activity {
     private CoordinatorLayout coordinatorLayout;
     private TextView titleView;
     private ImageButton buttonOpen;
+    /** True once this launch (or a later {@link #onNewIntent}) handed over a specific video via
+     *  {@code ACTION_VIEW} — an external caller (e.g. Nuvio) picked what to play, so offering to browse
+     *  to something else from inside the player doesn't match what that caller expects. Controls
+     *  {@link #buttonOpen}'s visibility; see where it's set in {@code onCreate}/{@code onNewIntent}. */
+    private boolean launchedWithMediaIntent = false;
     private ImageButton buttonPiP;
     private ImageButton buttonAspectRatio;
     private ImageButton buttonRotation;
@@ -291,6 +296,7 @@ public class PlayerActivity extends Activity {
                 handleSubtitles(uri);
             } else {
                 handleMediaIntent(uri, type, launchIntent.getExtras());
+                launchedWithMediaIntent = true;
             }
             focusPlay = true;
         }
@@ -356,6 +362,9 @@ public class PlayerActivity extends Activity {
         buttonOpen.setImageResource(R.drawable.ic_folder_open_24dp);
         buttonOpen.setId(View.generateViewId());
         buttonOpen.setContentDescription(getString(R.string.button_open));
+        // An external caller (ACTION_VIEW with a URI, e.g. Nuvio) picked what to play — browsing to
+        // something else from inside the player doesn't match what that caller expects back.
+        if (launchedWithMediaIntent) buttonOpen.setVisibility(View.GONE);
 
         buttonOpen.setOnClickListener(view -> openFile(mPrefs.mediaUri));
 
@@ -649,7 +658,7 @@ public class PlayerActivity extends Activity {
                 }
 
                 if (controllerVisible && playerView.isControllerFullyVisible()) {
-                    if (mPrefs.firstRun) {
+                    if (mPrefs.firstRun && !launchedWithMediaIntent) {
                         TapTargetView.showFor(PlayerActivity.this,
                                 TapTarget.forView(buttonOpen, getString(R.string.onboarding_open_title), getString(R.string.onboarding_open_description))
                                         .outerCircleColor(R.color.green)
@@ -796,6 +805,8 @@ public class PlayerActivity extends Activity {
                 } else {
                     resetApiAccess();
                     handleMediaIntent(uri, type, intent.getExtras());
+                    launchedWithMediaIntent = true;
+                    if (buttonOpen != null) buttonOpen.setVisibility(View.GONE);
                 }
                 focusPlay = true;
                 initializePlayer();
