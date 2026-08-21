@@ -77,6 +77,7 @@ public class TranslateView extends FrameLayout {
     private final LinearLayout pillRow;
     private final SubsCenteredBlock centeredBlock;
     private final SubsClock clock;
+    private final TextView errorNote;
     private final LinearLayout buttonRow;
 
     private Listener listener;
@@ -173,6 +174,17 @@ public class TranslateView extends FrameLayout {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         pillLp.topMargin = dp(20);
         column.addView(pillRow, pillLp);
+
+        // Under the bar and the capsules, on purpose: those can show *that* a chunk went red, never
+        // why. Multi-line and left-aligned because a provider message is a sentence, not a label.
+        errorNote = SubsTheme.labelSm(new TextView(context));
+        errorNote.setTextColor(SubsTheme.ERROR);
+        errorNote.setGravity(Gravity.CENTER);
+        errorNote.setVisibility(GONE);
+        LinearLayout.LayoutParams noteLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        noteLp.topMargin = dp(12);
+        column.addView(errorNote, noteLp);
 
         // --- the centred block (idle / unavailable / reading), and the button row ---
         centeredBlock = new SubsCenteredBlock(context);
@@ -291,6 +303,7 @@ public class TranslateView extends FrameLayout {
             showOnlyBlock(0, false, "", null, -1f);
             return;
         }
+        applyErrorNote(s.errorNote);
         switch (s.mode) {
             case UNAVAILABLE:
                 showOnlyBlock(R.drawable.subtitle_ic_unavailable, false, s.blockTitle, s.blockSub, -1f);
@@ -317,7 +330,17 @@ public class TranslateView extends FrameLayout {
         legendRow.setVisibility(GONE);
         chunkBarHost.setVisibility(GONE);
         pillRow.setVisibility(GONE);
+        errorNote.setVisibility(GONE);
         centeredBlock.show(icon, spinning, title != null ? title : "", sub, fraction);
+    }
+
+    private void applyErrorNote(@Nullable String note) {
+        if (note == null || note.isEmpty()) {
+            errorNote.setVisibility(GONE);
+            return;
+        }
+        errorNote.setText(note);
+        errorNote.setVisibility(VISIBLE);
     }
 
     private void renderResultHeader(TranslateUiState s) {

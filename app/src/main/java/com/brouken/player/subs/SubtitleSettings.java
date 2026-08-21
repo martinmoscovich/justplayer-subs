@@ -4,6 +4,8 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.text.TextUtils;
 
+import com.brouken.player.R;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -91,11 +93,12 @@ public final class SubtitleSettings {
      * behaviour: nothing is selected automatically and Media3's own default track selection applies.
      */
     public static boolean autoSelectEnabled(Context c) {
+        boolean def = c.getResources().getBoolean(R.bool.subs_default_auto_select);
         try {
-            return prefs(c).getBoolean(KEY_AUTO_SELECT, true);
+            return prefs(c).getBoolean(KEY_AUTO_SELECT, def);
         } catch (ClassCastException e) {
             prefs(c).edit().remove(KEY_AUTO_SELECT).apply();
-            return true;
+            return def;
         }
     }
 

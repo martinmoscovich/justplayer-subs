@@ -45,7 +45,8 @@ class SettingsTranslationClient implements TranslationClient {
     }
 
     private TranslationClient build() {
-        String provider = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER, "openrouter");
+        String provider = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER,
+                context.getString(R.string.subs_default_ai_provider));
         String model = SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_MODEL,
                 context.getString(R.string.subs_default_ai_model));
         String apiKey = SubtitleSettings.getApiKey(context, SubtitleSettings.KEY_AI_API_KEY);
@@ -63,6 +64,24 @@ class SettingsTranslationClient implements TranslationClient {
     @Override
     public String getModelId() {
         return delegate.getModelId();
+    }
+
+    /**
+     * Forwarded like every other method on this decorator. Easy to miss precisely because
+     * {@link TranslationClient#describeFailure} has a default: without this the pipeline sees this
+     * wrapper, not the real provider, and silently gets the generic fallback — which is how a clock
+     * error came out as a bare "OpenRouter network error: Chain validation failed".
+     */
+    @Override
+    public String describeFailure(Throwable error) {
+        return delegate.describeFailure(error);
+    }
+
+    /** Forwarded too — see {@link #describeFailure} for why a defaulted interface method is easy to
+     *  drop here without the compiler noticing. */
+    @Override
+    public boolean isPermanentFailure(Throwable error) {
+        return delegate.isPermanentFailure(error);
     }
 
     @Override

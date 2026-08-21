@@ -8,7 +8,15 @@
   app:defaultValue only lands once the user opens the settings screen. That makes a drifting literal
   a real behaviour difference, not a cosmetic one, which is why these live here and are referenced
   from both sides instead of being retyped.
+
+  Only Android-side defaults live here. The Sync numbers (reaction, nudge, seek, segment gap and
+  restart) are NOT here on purpose: their source of truth is the engine's SyncSettings.defaults(),
+  which is what SubtitleSettings.syncSettings() already feeds the sync session from. Mirroring them
+  into a resource would create a fourth copy of a value the engine already owns, so the preference
+  screen reads them from the engine too.
 -->
 <resources>
+    <string name="subs_default_ai_provider" translatable="false">openrouter</string>
     <string name="subs_default_ai_model" translatable="false">google/gemini-2.5-flash-lite</string>
+    <bool name="subs_default_auto_select">true</bool>
 </resources>

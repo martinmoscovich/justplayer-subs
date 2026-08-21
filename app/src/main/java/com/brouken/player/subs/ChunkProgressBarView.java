@@ -116,6 +116,16 @@ public class ChunkProgressBarView extends View {
     private static final int COLOR_TRANSLATING = SubsTheme.STATUS_TRANSLATING;
     private static final int COLOR_DONE = SubsTheme.STATUS_DONE;
     private static final int COLOR_FAILED = SubsTheme.STATUS_FAILED;
+    /**
+     * What the amber pulses <em>towards</em>. It used to pulse against a darkened copy of its own
+     * colour at 35% strength — same hue, small amplitude, so on a TV across the room the segment just
+     * looked static. Swinging to the darkest surface instead is a brightness change, unmistakably a
+     * pulse, and it collides with nothing: pulsing towards white would read as {@code STATUS_CLOSED}
+     * (#F4F7F9) and towards a mid-slate as {@code PENDING}/{@code EXTRACTING}.
+     */
+    private static final int COLOR_TRANSLATING_PULSE = SubsTheme.SURFACE_1;
+    /** Deep enough to read at a glance, short of 1.0 so the segment never looks absent at the trough. */
+    private static final float TRANSLATING_PULSE_DEPTH = 0.50f;
 
     public ChunkProgressBarView(Context context) {
         this(context, null);
@@ -217,7 +227,7 @@ public class ChunkProgressBarView extends View {
             int color;
             switch (seg.state) {
                 case DONE: color = COLOR_DONE; break;
-                case TRANSLATING: color = blend(COLOR_TRANSLATING, darken(COLOR_TRANSLATING), pulse * 0.35f); anyPulsing = true; break;
+                case TRANSLATING: color = blend(COLOR_TRANSLATING, COLOR_TRANSLATING_PULSE, pulse * TRANSLATING_PULSE_DEPTH); anyPulsing = true; break;
                 case CLOSED: color = COLOR_CLOSED; break;
                 case CLOSING: color = blend(COLOR_EXTRACTING, COLOR_CLOSED, pulse); anyPulsing = true; break;
                 case FAILED: color = COLOR_FAILED; break;
@@ -419,11 +429,6 @@ public class ChunkProgressBarView extends View {
     private static int lerp(int from, int to, float t) {
         return Math.round(from + (to - from) * t);
     }
-
-    private static int darken(int color) {
-        return blend(color, Color.BLACK, 0.25f);
-    }
-
     /** {@code m:ss}, or {@code h:mm:ss} past the hour mark — mirrors {@code TranslationController}'s. */
     static String formatDuration(long ms) {
         long totalSeconds = Math.max(0, ms) / 1000;

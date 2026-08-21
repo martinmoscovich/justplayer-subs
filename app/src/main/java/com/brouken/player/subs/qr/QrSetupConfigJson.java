@@ -53,7 +53,8 @@ final class QrSetupConfigJson {
     private static JSONObject current(Context context) throws JSONException {
         SyncSettings sync = SubtitleSettings.syncSettings(context);
         JSONObject out = new JSONObject();
-        out.put("aiProvider", SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER, "openrouter"));
+        out.put("aiProvider", SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER,
+                context.getString(R.string.subs_default_ai_provider)));
         out.put("aiModel", SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_MODEL,
                 context.getString(R.string.subs_default_ai_model)));
         out.put("targetLanguages", new JSONArray(SubtitleSettings.getLanguageList(context, SubtitleSettings.KEY_TARGET_LANGS)));

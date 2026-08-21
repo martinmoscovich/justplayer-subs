@@ -16,6 +16,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import subtitleengine.sync.SyncSettings;
+
 /**
  * Subtitle settings (General / Selection / Sync / Translation). Persists to the dedicated
  * {@code subtitle_prefs} file that {@link SubtitleSelectionController} and {@link SubtitleSyncController}
@@ -78,22 +80,26 @@ public class SubtitleSettingsFragment extends PreferenceFragmentCompat {
                 SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_MODEL, ""));
         setTextIfPresent(SubtitleSettings.KEY_AI_API_KEY,
                 SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_API_KEY, ""));
-        // Same default literals as res/xml/subtitle_settings.xml's app:defaultValue — keep in sync.
+        // Defaults straight from the engine, the same source SubtitleSettings.syncSettings() feeds
+        // the sync session from — so what this screen shows as the default cannot drift from what the
+        // sync actually uses. The preference XML deliberately carries no app:defaultValue for these.
+        SyncSettings d = SyncSettings.defaults();
         setTextIfPresent(SubtitleSettings.KEY_REACTION_MS,
-                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_REACTION_MS, 200)));
+                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_REACTION_MS, d.getReactionMs())));
         setTextIfPresent(SubtitleSettings.KEY_NUDGE_MS,
-                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_NUDGE_MS, 50)));
+                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_NUDGE_MS, d.getNudgeMs())));
         setTextIfPresent(SubtitleSettings.KEY_SEEK_S,
-                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_SEEK_S, 5)));
+                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_SEEK_S, d.getSeekMs() / 1000)));
         setTextIfPresent(SubtitleSettings.KEY_SEGMENT_GAP_S,
-                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_SEGMENT_GAP_S, 15)));
+                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_SEGMENT_GAP_S, d.getSegmentGapMs() / 1000)));
         setTextIfPresent(SubtitleSettings.KEY_SEGMENT_RESTART_S,
-                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_SEGMENT_RESTART_S, 3)));
+                String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_SEGMENT_RESTART_S, d.getSegmentRestartMs() / 1000)));
 
         Preference provider = findPreference(SubtitleSettings.KEY_AI_PROVIDER);
         if (provider instanceof ListPreference) {
             ((ListPreference) provider).setValue(
-                    SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER, "openrouter"));
+                    SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER,
+                            context.getString(R.string.subs_default_ai_provider)));
         }
         Preference autoSelect = findPreference(SubtitleSettings.KEY_AUTO_SELECT);
         if (autoSelect instanceof SwitchPreferenceCompat) {

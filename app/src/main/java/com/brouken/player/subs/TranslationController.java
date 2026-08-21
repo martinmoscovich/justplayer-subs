@@ -360,7 +360,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         if (result != null) {
             timeline.reset(videoDurationMs, 0L, result.getEntries());
             lastProgress = new TranslationProgress(RunStatus.DONE, 0, 0, 0, 0, 0, 0L, List.of(),
-                    null, null, null, false, null, 1.0, -1L, false, 0L, -1.0);
+                    null, null, null, false, null, 1.0, -1L, false, java.util.Map.of(), -1, null, 0L, -1.0);
             pushState();
         }
         return result;
@@ -510,8 +510,12 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
                 break;
             case DONE:
                 if (p.getFailedChunks() > 0 || p.getUntranslatedEntries() > 0) {
+                    // The throwable, not just its message: a partial failure is still a failure, and
+                    // the stack trace is the only place the real cause survives.
                     Log.w(TAG, "translation finished with warnings: failedChunks=" + p.getFailedChunks()
-                            + " untranslatedEntries=" + p.getUntranslatedEntries());
+                            + " untranslatedEntries=" + p.getUntranslatedEntries()
+                            + (chunkErrorNote(p) != null ? " lastChunkError=" + chunkErrorNote(p) : ""),
+                            p.getLastChunkError());
                 }
                 break;
             default:
@@ -574,6 +578,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         addCostPanel(b, "Spent so far", p, true);
         addLegend(b);
         addPills(b, p);
+        b.errorNote(chunkErrorNote(p));
         return b.build();
     }
 
@@ -586,7 +591,19 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
                 .panel("Paused at", formatDuration(watchableUntilMs()), "nothing is lost", true)
                 .panel("Spent so far", costFigure(p), "resume to continue", false);
         addLegend(b);
+        b.errorNote(chunkErrorNote(p));
         return b.build();
+    }
+
+    /**
+     * The explanation for the newest red chunk, or null when nothing is failed. Invariant the UI
+     * relies on: a red segment always has a reason, and when there is more than one only the most
+     * recent is shown — one line is all there is room for, and it is the one still worth acting on.
+     */
+    @Nullable
+    private static String chunkErrorNote(@Nullable TranslationProgress p) {
+        if (p == null || p.getChunkErrors() == null || p.getChunkErrors().isEmpty()) return null;
+        return p.getChunkErrors().get(p.getLastFailedChunkIndex());
     }
 
     private TranslateUiState finishedState(ButtonState buttons, @Nullable TranslationProgress p) {
@@ -609,6 +626,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
                 b = TranslateUiState.of(TranslateUiState.Mode.FINISHED, buttons)
                         .result(TranslateUiState.Tone.WARN, "Partially translated",
                                 kept > 0 ? kept + " lines kept in the original language" : null)
+                        .errorNote(chunkErrorNote(p))
                         .retryMissing(true);
                 break;
             case FINISHED_OK:
@@ -625,6 +643,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         addWatchablePanel(b, "Watchable up to", chunkCountSubline(p));
         addCostPanel(b, "Cost", p, false);
         addLegend(b);
+        b.errorNote(chunkErrorNote(p));
         return b.build();
     }
 

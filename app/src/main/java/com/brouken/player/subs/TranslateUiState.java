@@ -80,6 +80,13 @@ public final class TranslateUiState {
     public final boolean showBar;
     /** Whether this result has holes a retry could fill — the only thing that offers that button. */
     public final boolean canRetryMissing;
+    /**
+     * Why the most recent chunk failed, in plain language, or {@code null} when nothing has. Shown
+     * under the bar and the chunk capsules: those can say <em>that</em> a chunk went red, never why,
+     * and a red segment with no reason is not actionable. The last one is enough — it is the one the
+     * user can still do something about.
+     */
+    @Nullable public final String errorNote;
 
     private TranslateUiState(Builder b) {
         this.mode = b.mode;
@@ -94,6 +101,7 @@ public final class TranslateUiState {
         this.pills = List.copyOf(b.pills);
         this.showBar = b.showBar;
         this.canRetryMissing = b.canRetryMissing;
+        this.errorNote = b.errorNote;
     }
 
     public static Builder of(Mode mode, ButtonState buttons) {
@@ -110,6 +118,7 @@ public final class TranslateUiState {
         private final List<Pill> pills = new ArrayList<>();
         private boolean showBar;
         private boolean canRetryMissing;
+        @Nullable private String errorNote;
 
         private Builder(Mode mode, ButtonState buttons) {
             this.mode = mode;
@@ -146,6 +155,11 @@ public final class TranslateUiState {
 
         public Builder bar(boolean show) {
             this.showBar = show;
+            return this;
+        }
+
+        public Builder errorNote(@Nullable String note) {
+            this.errorNote = (note == null || note.isEmpty()) ? null : note;
             return this;
         }
 

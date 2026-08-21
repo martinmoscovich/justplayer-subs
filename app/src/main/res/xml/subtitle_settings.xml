@@ -25,7 +25,7 @@
             app:key="pref_auto_select"
             app:title="Auto-select subtitle"
             app:summary="Pick the best available subtitle by language priority, and re-check as embedded tracks and search results arrive"
-            app:defaultValue="true" />
+            app:defaultValue="@bool/subs_default_auto_select" />
         <EditTextPreference
             app:key="opensubtitles_api_key"
             app:title="OpenSubtitles API key"
@@ -34,30 +34,34 @@
             app:useSimpleSummaryProvider="false" />
     </PreferenceCategory>
 
+    <!-- Sin app:defaultValue a propósito: estos valores los define el engine
+         (SyncSettings.defaults()) y SubtitleSettingsFragment.refreshFromStorage() los siembra desde
+         ahí en onResume, que corre siempre antes de que se vean. Repetirlos acá sería una copia que
+         puede desincronizarse del valor que el sync realmente usa. -->
     <PreferenceCategory app:title="Sync">
         <EditTextPreference
             app:key="pref_reaction_ms"
             app:title="Reaction time (ms)"
             app:summary="Anchoring is back-dated by this much to absorb your reaction time"
-            app:defaultValue="200" />
+            />
         <EditTextPreference
             app:key="pref_nudge_ms"
             app:title="Nudge step (ms)"
-            app:defaultValue="50" />
+            />
         <EditTextPreference
             app:key="pref_seek_s"
             app:title="Seek step (s)"
-            app:defaultValue="5" />
+            />
         <EditTextPreference
             app:key="pref_segment_gap_s"
             app:title="Segment gap (s)"
             app:summary="A silence longer than this starts a new dialogue segment"
-            app:defaultValue="15" />
+            />
         <EditTextPreference
             app:key="pref_segment_restart_s"
             app:title="Prev-segment restart threshold (s)"
             app:summary="'Prev seg' restarts the current segment if you are at least this far into it"
-            app:defaultValue="3" />
+            />
     </PreferenceCategory>
 
     <PreferenceCategory app:title="Translation">
@@ -66,7 +70,7 @@
             app:title="AI provider"
             app:entries="@array/ai_provider_entries"
             app:entryValues="@array/ai_provider_values"
-            app:defaultValue="openrouter"
+            app:defaultValue="@string/subs_default_ai_provider"
             app:useSimpleSummaryProvider="true" />
         <EditTextPreference
             app:key="pref_ai_model"
