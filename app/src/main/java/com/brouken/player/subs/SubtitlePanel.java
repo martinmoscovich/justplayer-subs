@@ -301,7 +301,11 @@ public class SubtitlePanel extends FrameLayout
     }
 
     public void onTick(long positionMs) {
-        if (isOpen()) syncView.onTick(positionMs);
+        if (!isOpen()) return;
+        syncView.onTick(positionMs);
+        // Translate shows the same playback clock, so it needs the tick too — without this the
+        // counter there would freeze at whatever the last value was before the screen opened.
+        translateView.onTick(positionMs);
     }
 
     public boolean handleKey(KeyEvent event) {

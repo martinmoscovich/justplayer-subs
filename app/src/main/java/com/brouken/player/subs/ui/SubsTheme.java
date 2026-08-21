@@ -98,6 +98,12 @@ public final class SubsTheme {
     public static final int ON_LIGHT_STATE_BORDER = 0x40005763;
 
     // --- type roles (sp) ---
+    /** Above the headline roles, and used by exactly one thing: the playback clock on Sync and
+     *  Translate. Those two screens are read from the couch while the video keeps playing, so the
+     *  clock has to be legible at ~3m — a step above the largest headline, not a jumbo readout (48sp
+     *  was tried on the device and read as oversized). Not a general role: if a second element ever
+     *  wants this size, the scale needs a real decision, not a second caller. */
+    public static final float DISPLAY_SP = 40f;
     public static final float HEADLINE_LG_SP = 32f;
     public static final float HEADLINE_MD_SP = 24f;
     public static final float BODY_LG_SP = 20f;
@@ -106,6 +112,7 @@ public final class SubsTheme {
     public static final float LABEL_SM_SP = 12f;
 
     // --- type roles (tracking, em) ---
+    public static final float DISPLAY_TRACK = .01f;
     public static final float HEADLINE_LG_TRACK = .02f;
     public static final float HEADLINE_MD_TRACK = .01f;
     public static final float BODY_TRACK = .01f;
@@ -172,6 +179,14 @@ public final class SubsTheme {
     }
 
     // --- the six roles, applied ---
+
+    public static <T extends TextView> T display(T tv) {
+        style(tv, DISPLAY_SP, DISPLAY_TRACK, bold(tv.getContext()));
+        // Tabular figures: without them the digits have different widths, so a running clock jitters
+        // sideways every tick. A no-op on a font that lacks the feature.
+        tv.setFontFeatureSettings("tnum");
+        return tv;
+    }
 
     public static <T extends TextView> T headlineLg(T tv) {
         return style(tv, HEADLINE_LG_SP, HEADLINE_LG_TRACK, bold(tv.getContext()));

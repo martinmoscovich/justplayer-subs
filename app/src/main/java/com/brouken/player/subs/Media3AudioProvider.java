@@ -233,6 +233,12 @@ public class Media3AudioProvider implements AudioProvider {
         boolean readerFinished = false;
         int staleIterations = 0;
         PcmDownmixResampler acc = null;
+        // Every decoded buffer is ~32ms of audio, and decode runs tens of times faster than real
+        // time, so reporting each one posts ~1000-1900 progress events per second onto the main
+        // thread — each rebuilding the whole panel state, which janks the very spinner it is meant
+        // to advance. Report in 0.5% steps instead: ~200 updates for a whole window, more than a
+        // progress bar can render anyway. Same fix, same reason as Media3EmbeddedSubtitleProvider.
+        int lastReportedBucket = -1;
 
         while (!outputDone) {
             if (Thread.currentThread().isInterrupted()) {
@@ -265,7 +271,8 @@ public class Media3AudioProvider implements AudioProvider {
                         if (sample.timeUs >= startUs) {
                             if (acc == null) acc = newResampler(audio.format);
                             acc.append(sample.data, 0, sample.size);
-                            reportProgress(onProgress, sample.timeUs, startUs, durationSeconds);
+                            lastReportedBucket = reportProgress(
+                                    onProgress, sample.timeUs, startUs, durationSeconds, lastReportedBucket);
                         }
                     }
                 } else {
@@ -307,7 +314,8 @@ public class Media3AudioProvider implements AudioProvider {
                                         decoder.getSampleRate(), decoder.getChannelCount(), TARGET_RATE);
                             }
                             acc.append(outputBuffer.data, outputBuffer.data.remaining());
-                            reportProgress(onProgress, outputBuffer.timeUs, startUs, durationSeconds);
+                            lastReportedBucket = reportProgress(
+                                    onProgress, outputBuffer.timeUs, startUs, durationSeconds, lastReportedBucket);
                         }
                         outputBuffer.release();
                     }
@@ -342,12 +350,17 @@ public class Media3AudioProvider implements AudioProvider {
         return new PcmDownmixResampler(rate, channels, TARGET_RATE);
     }
 
-    private static void reportProgress(@Nullable ResyncProgressListener onProgress, long timeUs,
-                                       long startUs, double durationSeconds) {
-        if (onProgress == null || durationSeconds <= 0) return;
+    /** Reports at most one event per 0.5% of the window; returns the bucket to carry into the next
+     *  call. See the rationale where {@code lastReportedBucket} is declared. */
+    private static int reportProgress(@Nullable ResyncProgressListener onProgress, long timeUs,
+                                      long startUs, double durationSeconds, int lastReportedBucket) {
+        if (onProgress == null || durationSeconds <= 0) return lastReportedBucket;
         double coveredUs = Math.max(0, timeUs - startUs);
         double fraction = Math.max(0.0, Math.min(1.0, coveredUs / (durationSeconds * 1_000_000)));
+        int bucket = (int) (fraction * 200);
+        if (bucket == lastReportedBucket) return lastReportedBucket;
         onProgress.onProgress(ResyncProgressListener.Phase.EXTRACTING, fraction);
+        return bucket;
     }
 
     /** Truncated, never the full source string — media URLs can carry auth tokens in the query. */

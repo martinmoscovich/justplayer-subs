@@ -24,6 +24,7 @@ import java.util.Locale;
 import com.brouken.player.R;
 import com.brouken.player.subs.ui.SubsButton;
 import com.brouken.player.subs.ui.SubsCenteredBlock;
+import com.brouken.player.subs.ui.SubsClock;
 import com.brouken.player.subs.ui.SubsModal;
 import com.brouken.player.subs.ui.SubsShapes;
 import com.brouken.player.subs.ui.SubsText;
@@ -129,6 +130,7 @@ public class SyncView extends FrameLayout {
     private int buttonIndex = 0;
     private boolean lastPlaying = true;
     private boolean hasFocus = true;
+    private final SubsClock clock;
 
     public SyncView(Context context) {
         super(context);
@@ -139,6 +141,16 @@ public class SyncView extends FrameLayout {
         column.setPadding(dp(24), dp(56), dp(24), dp(14));
         addView(column, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Overlaid on the root FrameLayout rather than added to `column`, so it floats over the
+        // list in the corner instead of stealing a row of vertical space from it.
+        clock = new SubsClock(context);
+        FrameLayout.LayoutParams clockLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clockLp.gravity = Gravity.TOP | Gravity.END;
+        clockLp.topMargin = dp(12);
+        clockLp.rightMargin = dp(24);
+        addView(clock, clockLp);
 
         FrameLayout stage = new FrameLayout(context);
         column.addView(stage, new LinearLayout.LayoutParams(
@@ -295,6 +307,7 @@ public class SyncView extends FrameLayout {
     }
 
     public void onTick(long positionMs) {
+        clock.setPositionMs(positionMs); // before the session guard: the clock is not session state
         if (session == null) return;
         adapter.setActiveIndex(session.activeCueIndex(positionMs));
         if (autoscroll) {
@@ -435,20 +448,25 @@ public class SyncView extends FrameLayout {
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
                 anchorSelected();
-                exitListMode(true);
+                exitListMode();
                 return true;
             case KeyEvent.KEYCODE_BACK:
-                exitListMode(false);
+                exitListMode();
                 return true;
             default:
                 return false;
         }
     }
 
-    private void exitListMode(boolean anchored) {
+    private void exitListMode() {
         zone = Zone.CONTROLS;
         adapter.setSelectedIndex(-1);
-        if (anchored) autoscroll = true;
+        // Always resume following playback. Leaving the list means it stops being browsable — the
+        // selection is cleared and focus returns to the button row — so a list frozen wherever the
+        // user stopped scrolling only drifts further from the video, with no way back short of
+        // reopening the panel. This used to resume only on the anchoring exit, so backing out of
+        // "Sync line" left it stuck.
+        autoscroll = true;
         updateButtons();
         updateHint();
         updateReadout();
@@ -468,14 +486,26 @@ public class SyncView extends FrameLayout {
         if (session == null || p < 0 || p >= cues.size()) return;
         SubtitleEntry e = cues.get(p);
         session.anchor(e.getIndex(), e.getStartMs(), pos());
+        syncChanged();
+    }
+
+    /**
+     * Every path that mutates the sync state funnels through here. Besides re-rendering the overlay,
+     * the row times have to rebind: they show the <em>adjusted</em> start, so a nudge or an accepted
+     * auto-sync moves all of them. {@code notifyItemRangeChanged} is a non-structural change, so the
+     * D-pad selection and the scroll position survive it (unlike {@code notifyDataSetChanged}).
+     */
+    private void syncChanged() {
         if (listener != null) listener.onSyncChanged();
+        int n = adapter.getItemCount();
+        if (n > 0) adapter.notifyItemRangeChanged(0, n);
     }
 
     private void nudge(int dir) {
         if (session == null) return;
         if (dir < 0) session.nudgeLeft();
         else session.nudgeRight();
-        if (listener != null) listener.onSyncChanged();
+        syncChanged();
         updateReadout();
     }
 
@@ -572,7 +602,7 @@ public class SyncView extends FrameLayout {
     private void acceptAutoSync() {
         if (session != null && autoSyncState != null && autoSyncState.hasConfidentResult) {
             session.applyVadOffset(autoSyncState.offsetSeconds);
-            if (listener != null) listener.onSyncChanged();
+            syncChanged();
         }
         exitModal();
     }
@@ -884,7 +914,12 @@ public class SyncView extends FrameLayout {
             List<SubtitleEntry> cues = cues();
             SubtitleEntry e = cues.get(position);
             h.text.setText(String.join("\n", e.getLines()));
-            h.time.setText(clock(e.getStartMs()));
+            // The ADJUSTED start, not the file's raw one. This screen exists to line subtitles up
+            // with the video, so the useful number is when the cue will actually appear — which is
+            // also what picks the active row (activeCueIndex works on adjusted times) and what the
+            // playback clock in the corner counts. Showing the raw value made a cue reading 15:20
+            // light up while the clock said 14:38.
+            h.time.setText(clock(session != null ? session.adjust(e.getStartMs()) : e.getStartMs()));
 
             boolean active = position == activeIndex;
             boolean selected = position == selectedIndex;

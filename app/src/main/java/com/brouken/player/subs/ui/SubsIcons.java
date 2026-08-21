@@ -35,11 +35,21 @@ public final class SubsIcons {
     }
 
     /**
-     * Starts (or restarts) the continuous rotation of a spinner icon. The animator is parked on the
-     * view itself so {@link #stopSpin} can find it: a recycled list row that keeps spinning off-screen
-     * is an invisible wakeup every frame, forever.
+     * Starts the continuous rotation of a spinner icon, or leaves an already-running one alone.
+     * The animator is parked on the view itself so {@link #stopSpin} can find it: a recycled list
+     * row that keeps spinning off-screen is an invisible wakeup every frame, forever.
      */
     public static void spin(View v) {
+        Object existing = v.getTag();
+        if (existing instanceof ObjectAnimator && ((ObjectAnimator) existing).isRunning()) {
+            // Already spinning: leave it alone. Callers drive this from state-update methods that
+            // run on every progress event — SubsCenteredBlock.show() from each auto-sync tick, the
+            // selector's row bind on every list refresh — and restarting cancels the animator and
+            // snaps rotation back to 0 (see stopSpin). At a few updates per second the glyph never
+            // gets past the first frame, so the spinner reads as frozen at 0° rather than as a slow
+            // or stuttering spin. Idempotent start is what every caller actually wants.
+            return;
+        }
         stopSpin(v);
         ObjectAnimator a = ObjectAnimator.ofFloat(v, View.ROTATION, 0f, 360f);
         a.setDuration(SPIN_MS);

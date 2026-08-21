@@ -18,6 +18,7 @@ import java.util.List;
 import com.brouken.player.R;
 import com.brouken.player.subs.ui.SubsButton;
 import com.brouken.player.subs.ui.SubsCenteredBlock;
+import com.brouken.player.subs.ui.SubsClock;
 import com.brouken.player.subs.ui.SubsFigurePanel;
 import com.brouken.player.subs.ui.SubsIcons;
 import com.brouken.player.subs.ui.SubsShapes;
@@ -75,6 +76,7 @@ public class TranslateView extends FrameLayout {
     private final FrameLayout chunkBarHost;
     private final LinearLayout pillRow;
     private final SubsCenteredBlock centeredBlock;
+    private final SubsClock clock;
     private final LinearLayout buttonRow;
 
     private Listener listener;
@@ -97,6 +99,16 @@ public class TranslateView extends FrameLayout {
         column.setPadding(dp(24), dp(20), dp(24), dp(14));
         addView(column, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Bottom-right, overlaid on the root FrameLayout. The button row below is centred, so the
+        // corner stays clear of it.
+        clock = new SubsClock(context);
+        FrameLayout.LayoutParams clockLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clockLp.gravity = Gravity.BOTTOM | Gravity.END;
+        clockLp.bottomMargin = dp(14);
+        clockLp.rightMargin = dp(24);
+        addView(clock, clockLp);
 
         // --- result header: a ring, a headline, a detail line ---
         resultHeader = new LinearLayout(context);
@@ -179,6 +191,11 @@ public class TranslateView extends FrameLayout {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         rebuildButtons(ButtonState.IDLE);
+    }
+
+    /** Driven by the panel's playback tick, same as {@link com.brouken.player.subs.SyncView}. */
+    public void onTick(long positionMs) {
+        clock.setPositionMs(positionMs);
     }
 
     public void setListener(Listener l) {
