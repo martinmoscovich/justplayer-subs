@@ -65,6 +65,13 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
     public void readCues(String source, int trackIndex, long resumeFromMs,
                          @Nullable ProgressListener onProgress, CueSink sink) throws Exception {
         Uri uri = Uri.parse(source);
+        // Parallel fetch (ParallelChunkedDataSource) reverted to sequential for now: confirmed real on
+        // device (up to 4 overlapping connections, real speedup) but also confirmed two real bugs under
+        // frequent seeks -- an OutOfMemoryError from abandoned chunks outliving their window (fixed with
+        // a shorter per-chunk timeout) and, still open, an HTTP 416 whose chunk-range math checks out on
+        // this end, so it looks like the seek-churn itself (a window torn down and rebuilt on every
+        // Matroska SeekHead/Cues jump) hitting a proxy that tolerates concurrent/rapid connections worse
+        // than a plain debrid mirror does. See PENDING.md for the full trail before re-enabling.
         DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers, uri);
         Extractor extractor = null;
         try {

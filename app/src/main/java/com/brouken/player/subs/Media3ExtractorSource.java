@@ -67,9 +67,19 @@ final class Media3ExtractorSource {
      */
     static DataSource createDataSource(Context context, @Nullable Map<String, String> headers,
                                        @Nullable Uri mediaUri) {
+        return createDataSource(context, headers, mediaUri, HTTP_TIMEOUT_MS);
+    }
+
+    /**
+     * Same as {@link #createDataSource(Context, Map, Uri)}, with an explicit connect/read timeout
+     * instead of the shared 30s default — see {@link ParallelChunkedDataSource} for why a chunk fetch
+     * wants a much shorter one than a single long sequential read does.
+     */
+    static DataSource createDataSource(Context context, @Nullable Map<String, String> headers,
+                                       @Nullable Uri mediaUri, int timeoutMs) {
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-                .setConnectTimeoutMs(HTTP_TIMEOUT_MS)
-                .setReadTimeoutMs(HTTP_TIMEOUT_MS)
+                .setConnectTimeoutMs(timeoutMs)
+                .setReadTimeoutMs(timeoutMs)
                 // Debrid links redirect between http and https; without this the read dies on the
                 // first redirect while playback (which sets it elsewhere) carries on fine.
                 .setAllowCrossProtocolRedirects(true);
@@ -95,6 +105,18 @@ final class Media3ExtractorSource {
             http.setDefaultRequestProperties(requestProperties);
         }
         return new DefaultDataSource.Factory(context, http).createDataSource();
+    }
+
+    /**
+     * Same headers/auth/redirect handling as {@link #createDataSource}, but fetches its bytes through
+     * several concurrent Range-GET connections instead of one sequential stream — see
+     * {@link ParallelChunkedDataSource} for why and the measurements behind it. Drop-in: satisfies the
+     * same {@link DataSource} contract, including {@link #openAt}'s close-then-reopen-at-a-new-position
+     * seek handling, which this needs unchanged to behave correctly.
+     */
+    static DataSource createParallelDataSource(Context context, @Nullable Map<String, String> headers,
+                                                @Nullable Uri mediaUri) {
+        return new ParallelChunkedDataSource(context, headers, mediaUri);
     }
 
     /** Header names are case-insensitive (RFC 9110 §5.1), so an intent may spell it "user-agent". */
