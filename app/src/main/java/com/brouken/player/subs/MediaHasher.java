@@ -13,8 +13,12 @@ import androidx.media3.datasource.DefaultDataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
 
+import subtitleengine.concurrent.ParallelTasks;
 import subtitleengine.provider.OpenSubtitlesHash;
 
 /**
@@ -54,24 +58,49 @@ public final class MediaHasher {
     /** @return {@code [hexHash, sizeBytes]}, or {@code null} — OpenSubtitles matches on both. */
     @Nullable
     public static String[] hashAndSize(Context context, Uri uri, @Nullable Map<String, String> headers) {
-        DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers, uri);
+        DataSource headSource = Media3ExtractorSource.createDataSource(context, headers, uri);
+        DataSource tailSource = null;
         try {
-            long size = dataSource.open(new DataSpec.Builder().setUri(uri).build());
+            long size = headSource.open(new DataSpec.Builder().setUri(uri).build());
             if (size == C.LENGTH_UNSET || size <= 0) {
                 // A live stream or a server without Content-Length has no stable identity anyway.
                 Log.i(TAG, "media length unknown — no hash, so no cache for this source");
                 return null;
             }
             int chunk = (int) Math.min(OpenSubtitlesHash.CHUNK_BYTES, size);
-            byte[] head = readFully(dataSource, chunk);
+
+            byte[] head;
             byte[] tail = null;
-            if (size > OpenSubtitlesHash.CHUNK_BYTES) {
-                dataSource.close();
-                dataSource.open(new DataSpec.Builder().setUri(uri)
-                        .setPosition(size - OpenSubtitlesHash.CHUNK_BYTES)
-                        .setLength(OpenSubtitlesHash.CHUNK_BYTES)
-                        .build());
-                tail = readFully(dataSource, OpenSubtitlesHash.CHUNK_BYTES);
+            if (size <= OpenSubtitlesHash.CHUNK_BYTES) {
+                head = readFully(headSource, chunk);
+            } else {
+                // Head's body and the tail range are independent once `size` is known, so they run
+                // concurrently instead of head-then-tail. On the debrid mirrors this reads from, every
+                // response comes back "Connection: close" (confirmed with curl -v) — there is no
+                // keep-alive connection for a sequential fetch to reuse, so each is its own TCP+TLS
+                // handshake regardless of order. Running them together turns
+                // time(head) + time(tail) into max(time(head), time(tail)).
+                tailSource = Media3ExtractorSource.createDataSource(context, headers, uri);
+                DataSource finalTailSource = tailSource;
+                List<Callable<byte[]>> tasks = List.of(
+                        () -> readFully(headSource, chunk),
+                        () -> {
+                            finalTailSource.open(new DataSpec.Builder().setUri(uri)
+                                    .setPosition(size - OpenSubtitlesHash.CHUNK_BYTES)
+                                    .setLength(OpenSubtitlesHash.CHUNK_BYTES)
+                                    .build());
+                            return readFully(finalTailSource, OpenSubtitlesHash.CHUNK_BYTES);
+                        });
+                try {
+                    List<byte[]> chunks = ParallelTasks.run("media-hasher", tasks);
+                    head = chunks.get(0);
+                    tail = chunks.get(1);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("hash interrupted", e);
+                } catch (ExecutionException e) {
+                    throw new IOException("head/tail fetch failed", e.getCause());
+                }
             }
             String[] hashAndSize = OpenSubtitlesHash.fromChunks(size, head, tail);
             Log.i(TAG, "media hash " + hashAndSize[0] + " (size " + size + ")");
@@ -80,7 +109,10 @@ public final class MediaHasher {
             Log.w(TAG, "could not hash the media — continuing without cache", e);
             return null;
         } finally {
-            try { dataSource.close(); } catch (Exception ignored) { }
+            try { headSource.close(); } catch (Exception ignored) { }
+            if (tailSource != null) {
+                try { tailSource.close(); } catch (Exception ignored) { }
+            }
         }
     }
 
