@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executor;
 
 import subtitleengine.core.model.SubtitleEntry;
@@ -106,18 +107,28 @@ class ChunkTimelineTrackerTest {
 
     private static TranslationProgress running(List<ChunkProgress> active, boolean lastChunkFailed) {
         return new TranslationProgress(RunStatus.RUNNING, active.size(), 0, active.size(), 0, 0, 0L,
-                active, null, null, null, false, null, 1.0, -1L, lastChunkFailed, 0L, -1.0);
+                active, null, null, null, false, null, 1.0, -1L, lastChunkFailed, Map.of(), -1, null,
+                0L, -1.0);
     }
 
     private static TranslationProgress streaming(List<ChunkProgress> active, long extractedContentMs) {
         return new TranslationProgress(RunStatus.RUNNING, active.size(), 0, active.size(), 0, 0, 0L,
                 active, null, null, null, true, TranslationProgress.SourceState.READY, 0.5, -1L, false,
-                extractedContentMs, 1.0);
+                Map.of(), -1, null, extractedContentMs, 1.0);
+    }
+
+    /** Same as {@link #streaming}, but with {@code extractionSpeedFactor} at its real pre-first-chunk
+     *  value ({@code -1}, "not measured yet") instead of a fixed {@code 1.0} — the case that matters for
+     *  whether the EXTRACTING segment's label degrades to a plain percentage instead of disappearing. */
+    private static TranslationProgress streamingBeforeAnyChunkStarted(long extractedContentMs) {
+        return new TranslationProgress(RunStatus.RUNNING, 0, 0, 0, 0, 0, 0L,
+                List.of(), null, null, null, true, TranslationProgress.SourceState.WAITING, 0.5, -1L, false,
+                Map.of(), -1, null, extractedContentMs, -1.0);
     }
 
     private static TranslationProgress done() {
         return new TranslationProgress(RunStatus.DONE, 1, 1, 1, 0, 0, 0L, List.of(), null, null, null,
-                false, null, 1.0, -1L, false, 0L, -1.0);
+                false, null, 1.0, -1L, false, Map.of(), -1, null, 0L, -1.0);
     }
 
     // -------------------------------------------------------------------------------------------
@@ -322,6 +333,27 @@ class ChunkTimelineTrackerTest {
         ChunkProgressBarView.Segment third = model.segments.get(2);
         assertEquals(ChunkProgressBarView.SegmentState.EXTRACTING, third.state);
         assertEquals(0.5f, third.extractingFill, 0.001f);
+    }
+
+    @Test
+    void streaming_extractingBeforeFirstChunkStarted_labelDegradesToPlainPercent_notNull() {
+        // Regression: the EXTRACTING segment's fill/label are driven by TranslationProgress, whose
+        // extractionSpeedFactor stays -1 (unmeasured) until a chunk is actively translating — which
+        // for a run's very first segment means the whole run-up to the first chunk closing. The old
+        // "label = null unless speedFactor > 0" left this window's segment fill-only, with no percent
+        // ever shown next to it, even though real extraction progress was there the whole time.
+        ChunkingConfig config = config(1_000L, 1_000L);
+        ChunkTimelineTracker tracker = new ChunkTimelineTracker(config);
+        SubtitlePipelineSession session = neverStartedSession(config);
+
+        tracker.reset(1_000L, 0L, null); // one estimated segment, [0, 1000)
+        ChunkProgressBarView.Model model = tracker.buildModel(streamingBeforeAnyChunkStarted(400L), session, 0L);
+
+        assertEquals(1, model.segments.size());
+        ChunkProgressBarView.Segment seg = model.segments.get(0);
+        assertEquals(ChunkProgressBarView.SegmentState.EXTRACTING, seg.state);
+        assertEquals(0.4f, seg.extractingFill, 0.001f);
+        assertEquals("40%", seg.label, "no speed factor yet must still show a plain percentage, not null");
     }
 
     @Test

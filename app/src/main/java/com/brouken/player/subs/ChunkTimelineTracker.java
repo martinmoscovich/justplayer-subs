@@ -364,9 +364,12 @@ final class ChunkTimelineTracker {
                             endEstimated, backgroundPass, 0f, null);
                 }
                 float fill = clamp01((float) (extracted - start) / (float) (end - start));
+                // The speed factor is only known once a chunk is actively translating (see
+                // SubtitlePipelineSession.updateEtaLocked) — before the first chunk starts, extraction
+                // is still real progress worth showing, just without the "· 1.2x" half of the label.
                 String label = progress.getExtractionSpeedFactor() > 0
                         ? String.format(Locale.US, "%d%% · %.1fx", Math.round(fill * 100), progress.getExtractionSpeedFactor())
-                        : null;
+                        : String.format(Locale.US, "%d%%", Math.round(fill * 100));
                 return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.EXTRACTING,
                         endEstimated, backgroundPass, fill, label);
             }
