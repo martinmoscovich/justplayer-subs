@@ -114,6 +114,28 @@ class ChunkTimelineTrackerTest {
         };
     }
 
+    /** Same as {@link #neverStartedSession}, but {@link SubtitlePipelineSession#isRangeReady} always
+     *  says yes — stands in for translated content racing ahead of a still-*estimated* segment's
+     *  guessed boundary, which a real session can do without that segment's own chunk having closed. */
+    private static SubtitlePipelineSession alwaysReadySession(ChunkingConfig config) {
+        TranslationClient client = new TranslationClient() {
+            @Override public String getName() { return "fake"; }
+            @Override public String getModelId() { return "fake"; }
+            @Override public CompletionResult complete(String systemPrompt, String userPrompt) {
+                throw new AssertionError("should never be called — session is never started");
+            }
+        };
+        SubtitleTranslator translator = new SubtitleTranslator(client, new SubtitleChunker(), 1, 0);
+        Executor sameThread = Runnable::run;
+        SubtitlePipelineSession.Listener noopListener = new SubtitlePipelineSession.Listener() {
+            @Override public void onSubtitleUpdated(SubtitleFile current) { }
+            @Override public void onProgress(TranslationProgress progress) { }
+        };
+        return new SubtitlePipelineSession(translator, config, 1, sameThread, noopListener) {
+            @Override public boolean isRangeReady(long startMs, long endMs) { return true; }
+        };
+    }
+
     private static SubtitleEntry entry(int index, long startMs, long endMs) {
         return new SubtitleEntry(index, startMs, endMs, List.of("line " + index));
     }
@@ -400,6 +422,29 @@ class ChunkTimelineTrackerTest {
         assertEquals(ChunkProgressBarView.SegmentState.EXTRACTING, seg.state);
         assertEquals(0.7f, seg.extractingFill, 0.001f, "fill must follow the live byte fraction, not the stale cue");
         assertEquals("70%", seg.label);
+    }
+
+    @Test
+    void streaming_estimatedSegmentNeverShowsDoneOffIsRangeReadyAlone() {
+        // Regression: DONE used to be granted to ANY segment whose [start, end) session.isRangeReady()
+        // said yes, real boundary or not. A still-*estimated* segment's guessed end can land inside
+        // content that real progress (racing ahead of the naive per-slot target) already fully
+        // translated, before the real chunk boundary there is even known — showing DONE (green) for a
+        // tick, then reverting to pending (blank) once the real boundary landed elsewhere and the guess
+        // got recomputed. An estimated segment must never trust isRangeReady on its own; CLOSING (which
+        // this falls through to, since extraction is already past this guessed end too) covers
+        // "translated is here, the real cut just isn't decided yet" without ever flashing green first.
+        ChunkingConfig config = config(1_000L, 1_000L);
+        ChunkTimelineTracker tracker = new ChunkTimelineTracker(config);
+        SubtitlePipelineSession session = alwaysReadySession(config);
+
+        tracker.reset(1_000L, 0L, null); // one estimated segment, [0, 1000)
+        ChunkProgressBarView.Model model = tracker.buildModel(streaming(List.of(), 1_500L), session, 0L);
+
+        assertEquals(1, model.segments.size());
+        ChunkProgressBarView.Segment seg = model.segments.get(0);
+        assertEquals(ChunkProgressBarView.SegmentState.CLOSING, seg.state,
+                "an estimated segment must never show DONE off isRangeReady alone");
     }
 
     @Test

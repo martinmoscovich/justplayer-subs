@@ -324,8 +324,14 @@ final class ChunkTimelineTracker {
         }
         // Translated already? A direct, range-scoped question — session.isRangeReady(start, end) says
         // yes only once every entry actually inside [start, end) is done, regardless of what came
-        // before it, after it, or which pass (priority or background) reached it first.
-        if (session.isRangeReady(start, end)) {
+        // before it, after it, or which pass (priority or background) reached it first. Gated to a real
+        // boundary only: an *estimated* [start, end) is a guess, and translation racing ahead of the
+        // naive per-slot estimate can make a guessed span happen to already be fully translated before
+        // the real chunk boundary there is even known. Rendering that DONE looked right for a tick, then
+        // flipped back to pending once the real boundary landed somewhere else and the estimate was
+        // recomputed — a segment that visibly regresses from green to blank. CLOSING (below) already
+        // covers "translated content is here but the real cut isn't decided yet" without that flicker.
+        if (!endEstimated && session.isRangeReady(start, end)) {
             return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.DONE,
                     endEstimated, backgroundPass, 0f, null);
         }
