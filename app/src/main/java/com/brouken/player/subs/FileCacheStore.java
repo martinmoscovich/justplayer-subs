@@ -8,6 +8,8 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.brouken.player.subs.debug.DebugLog;
+
 import subtitleengine.cache.CacheStore;
 
 /**
@@ -30,11 +32,24 @@ public class FileCacheStore implements CacheStore {
         this.dir = new File(context.getCacheDir(), DIR_NAME);
     }
 
+    /**
+     * Every cache read, write and removal passes through here, which makes this the one place that can
+     * answer "what was served from disk and what was paid for again" without the engine knowing debug
+     * mode exists — the engine's own {@code SubtitleCache} only logs failures. Reconstructing a session
+     * needs the hits as much as the misses: a run that looks free was a hit, and a run that repeats
+     * work someone already paid for is a miss that should not have been one.
+     */
     @Override
     public byte[] read(String key) throws IOException {
         File f = fileFor(key);
-        if (!f.isFile()) return null;
-        return Files.readAllBytes(f.toPath());
+        if (!f.isFile()) {
+            DebugLog.log(DebugLog.CAT_CACHE, "miss " + key);
+            return null;
+        }
+        byte[] data = Files.readAllBytes(f.toPath());
+        DebugLog.log(DebugLog.CAT_CACHE, () -> "hit " + key + " (" + data.length + " bytes, stored "
+                + EmbeddedSubtitleController.ageDescription(f.lastModified()) + ")");
+        return data;
     }
 
     @Override
@@ -57,11 +72,13 @@ public class FileCacheStore implements CacheStore {
             // and no sweep would ever reclaim them.
             Files.deleteIfExists(tmp.toPath());
         }
+        DebugLog.log(DebugLog.CAT_CACHE, () -> "write " + key + " (" + data.length + " bytes)");
     }
 
     @Override
     public void remove(String key) throws IOException {
-        Files.deleteIfExists(fileFor(key).toPath());
+        boolean existed = Files.deleteIfExists(fileFor(key).toPath());
+        DebugLog.log(DebugLog.CAT_CACHE, "remove " + key + (existed ? "" : " (was not stored)"));
     }
 
     @Override

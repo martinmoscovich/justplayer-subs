@@ -84,4 +84,18 @@
             app:summary="OpenRouter / Gemini API key" />
     </PreferenceCategory>
 
+    <!-- El summary de "Clear debug logs" lo escribe SubtitleSettingsFragment (cantidad de archivos y
+         tamaño), y la fila queda deshabilitada mientras el modo debug está apagado: con debug off no
+         hay nada que borrar, porque apagarlo ya borra todo. -->
+    <PreferenceCategory app:title="Debug">
+        <SwitchPreferenceCompat
+            app:key="pref_debug_mode"
+            app:title="Debug mode"
+            app:summary="Record a log per playback (video, audio track, subtitles, auto-sync and translation runs). Turning it off deletes the logs. API keys are never written."
+            app:defaultValue="false" />
+        <Preference
+            app:key="pref_debug_clear_logs"
+            app:title="Clear debug logs" />
+    </PreferenceCategory>
+
 </PreferenceScreen>

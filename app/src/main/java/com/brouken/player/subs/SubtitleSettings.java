@@ -38,6 +38,9 @@ public final class SubtitleSettings {
     public static final String KEY_AI_PROVIDER = "pref_ai_provider";
     public static final String KEY_AI_MODEL = "pref_ai_model";
     public static final String KEY_AI_API_KEY = "pref_ai_api_key";
+    // Debug
+    public static final String KEY_DEBUG_MODE = "pref_debug_mode";
+    public static final String KEY_DEBUG_CLEAR_LOGS = "pref_debug_clear_logs";
 
     private SubtitleSettings() {
     }
@@ -99,6 +102,19 @@ public final class SubtitleSettings {
         } catch (ClassCastException e) {
             prefs(c).edit().remove(KEY_AUTO_SELECT).apply();
             return def;
+        }
+    }
+
+    /**
+     * Whether to record a per-playback debug log (see {@code subs.debug.DebugLog}). Off by default,
+     * and off means <em>nothing on disk</em>: turning it off deletes whatever was written.
+     */
+    public static boolean debugEnabled(Context c) {
+        try {
+            return prefs(c).getBoolean(KEY_DEBUG_MODE, false);
+        } catch (ClassCastException e) {
+            prefs(c).edit().remove(KEY_DEBUG_MODE).apply();
+            return false;
         }
     }
 

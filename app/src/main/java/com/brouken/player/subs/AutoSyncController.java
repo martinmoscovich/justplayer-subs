@@ -13,6 +13,7 @@ import android.widget.TextView;
 import androidx.annotation.Nullable;
 
 import com.brouken.player.R;
+import com.brouken.player.subs.debug.DebugLog;
 import com.brouken.player.subs.ui.SubsPill;
 import com.brouken.player.subs.ui.SubsTheme;
 
@@ -28,6 +29,7 @@ import subtitleengine.resync.DialogueDensityProbeLocator;
 import subtitleengine.resync.DialoguePacingEvidencePolicy;
 import subtitleengine.resync.FractionalProbeLocator;
 import subtitleengine.resync.ProbePlacement;
+import subtitleengine.vad.ResyncProgressListener;
 import subtitleengine.vad.ResyncResult;
 import subtitleengine.vad.SileroVadEngine;
 import subtitleengine.vad.SubtitleResyncer;
@@ -256,7 +258,22 @@ public class AutoSyncController implements AutoSyncSession.Listener {
 
     private void start(double startSeconds, double analysisSeconds, double maxOffsetSeconds,
                         @Nullable Double secondProbeStartSeconds, int matchedEventsSlack) {
-        if (!canStart()) return;
+        String unavailable = reasonUnavailable();
+        if (unavailable != null) {
+            DebugLog.log(DebugLog.CAT_AUTOSYNC, "start refused: " + unavailable);
+            return;
+        }
+        // Everything that decides the outcome, in one line: re-running this by hand needs all of it,
+        // and the engine's own "resync candidate:" line reports only the half it can see.
+        DebugLog.log(DebugLog.CAT_AUTOSYNC, () -> String.format(Locale.US,
+                "start probe=%.1fs window=%.1fs maxOffset=%.1fs bin=%dms secondProbe=%s slack=%d "
+                        + "subtitleCues=%d media=%s",
+                startSeconds, analysisSeconds, maxOffsetSeconds, BIN_MS,
+                secondProbeStartSeconds == null ? "none"
+                        : String.format(Locale.US, "%.1fs", secondProbeStartSeconds),
+                matchedEventsSlack, subtitle != null ? subtitle.getEntries().size() : 0, mediaUri));
+        lastLoggedPhase = null;
+        lastLoggedFractionStep = -1;
         indicatorTerminalText = null;
         try {
             ensureSession().start(startSeconds, analysisSeconds, maxOffsetSeconds, BIN_MS, secondProbeStartSeconds,
@@ -264,6 +281,7 @@ public class AutoSyncController implements AutoSyncSession.Listener {
         } catch (Throwable t) {
             // Most likely SileroVadEngine's ONNX init on first start() — never fail silently.
             Log.e(TAG, "start: failed to initialize auto-sync engine", t);
+            DebugLog.log(DebugLog.CAT_AUTOSYNC, "engine init failed: " + t);
             lastProgress = null;
             panel.setAutoSyncState(AutoSyncUiState.terminal(
                     "Auto-sync failed: " + (t.getMessage() != null ? t.getMessage() : "engine init failed")));
@@ -286,10 +304,6 @@ public class AutoSyncController implements AutoSyncSession.Listener {
     }
 
     // --- availability ---
-
-    private boolean canStart() {
-        return reasonUnavailable() == null;
-    }
 
     @Nullable
     private String reasonUnavailable() {
@@ -332,8 +346,52 @@ public class AutoSyncController implements AutoSyncSession.Listener {
         if (progress.getStatus() == AutoSyncSession.Status.ERROR) {
             Log.e(TAG, "auto-sync failed: " + progress.getErrorMessage(), progress.getError());
         }
+        logProgress(progress);
         updateIndicatorTerminalFlash(progress);
         pushState();
+    }
+
+    // --- debug log ---
+
+    /** Last phase/decile written, so a run reports its shape without one line per 0.5% of extraction. */
+    @Nullable private ResyncProgressListener.Phase lastLoggedPhase;
+    private int lastLoggedFractionStep = -1;
+
+    /**
+     * The run as it happens. Progress is throttled to phase changes and 10% steps: the engine reports
+     * EXTRACTING roughly 200 times per probe (see {@code Media3AudioProvider}'s bucketing), and a log
+     * that granular hides the events on either side of it. The terminal states are never throttled —
+     * they are the answer.
+     */
+    private void logProgress(AutoSyncProgress p) {
+        if (!DebugLog.enabled()) return;
+        switch (p.getStatus()) {
+            case RUNNING:
+                int step = (int) (runFraction(p) * 10);
+                if (p.getPhase() == lastLoggedPhase && step == lastLoggedFractionStep) return;
+                lastLoggedPhase = p.getPhase();
+                lastLoggedFractionStep = step;
+                DebugLog.log(DebugLog.CAT_AUTOSYNC, p.getPhase() + " " + (step * 10) + "%");
+                break;
+            case DONE:
+                ResyncResult r = p.getResult();
+                DebugLog.log(DebugLog.CAT_AUTOSYNC, r != null
+                        ? String.format(Locale.US, "DONE offset=%+.2fs uniqueness=%.3f matched=%d",
+                                r.getOffsetSeconds(), r.getUniqueness(), r.getMatchedEvents())
+                        // Not an error: it ran and found nothing convincing. The engine's own
+                        // "resync candidate: … REJECT (…)" line above says which gate turned it down.
+                        : "DONE no confident match");
+                break;
+            case CANCELLED:
+                DebugLog.log(DebugLog.CAT_AUTOSYNC, "cancelled");
+                break;
+            case ERROR:
+                DebugLog.log(DebugLog.CAT_AUTOSYNC, "ERROR " + p.getErrorMessage()
+                        + (p.getError() != null ? " (" + p.getError() + ")" : ""));
+                break;
+            default:
+                break;
+        }
     }
 
     // --- panel state push ---

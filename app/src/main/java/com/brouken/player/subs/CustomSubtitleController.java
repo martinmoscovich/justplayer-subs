@@ -17,6 +17,10 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 
 import java.util.List;
 
+import com.brouken.player.subs.debug.DebugLog;
+import com.brouken.player.subs.debug.PlaybackLogger;
+import com.brouken.player.subs.debug.SubtitleDebugFormat;
+
 import subtitleengine.cache.CachedTranslation;
 import subtitleengine.cache.SubtitleCache;
 import subtitleengine.core.model.SubtitleFile;
@@ -62,6 +66,11 @@ public class CustomSubtitleController
      */
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsListener =
             (prefs, key) -> handler.post(this::onSettingsChanged);
+    /** Debug mode only: records the audio track and every pause/resume/seek/stall — see its javadoc
+     *  for why the rest of the log is unreadable without them. Registered unconditionally (it costs a
+     *  no-op call per player event when debug is off) so turning debug on mid-playback still catches
+     *  everything from that point. */
+    private final PlaybackLogger playbackLogger;
     private boolean ticking;
     @Nullable private Uri mediaUri;
     /** The option currently selected, kept so the Translate/Sync screens know what they are acting on. */
@@ -156,12 +165,19 @@ public class CustomSubtitleController
         embedded.setOnHashReady(sizeBytes -> selection.onMediaHash(embedded.videoHash(), sizeBytes));
 
         SubtitleSettings.prefs(context).registerOnSharedPreferenceChangeListener(settingsListener);
+        // Also the startup sweep: with debug mode off this deletes anything an earlier run left behind
+        // (a process killed before the toggle's own delete ran, or prefs written by the QR setup).
+        DebugLog.applySetting(context);
+        playbackLogger = new PlaybackLogger(player);
+        player.addListener(playbackLogger);
     }
 
     /** See {@link #settingsListener}. Always on the main thread. */
     private void onSettingsChanged() {
         sync.reloadSettings(context);
         selection.refresh();
+        // Picks up the debug toggle, and rebuilds the credential mask when the QR setup rewrites a key.
+        DebugLog.applySetting(context);
     }
 
     public void onMediaSet(@Nullable Uri mediaUri,
@@ -170,6 +186,11 @@ public class CustomSubtitleController
         this.mediaUri = mediaUri;
         this.selectedOption = null;
         notice.hide(); // a notice about the previous media must not survive into this one
+        playbackLogger.reset();
+        durationLogged = false;
+        // Idempotent per media URI on purpose: onMediaSet fires twice per playback (see TESTING.md),
+        // and that must not produce two log files for one playback.
+        DebugLog.startSession(context, mediaUri, selection.mediaTitle());
         embedded.setMedia(mediaUri);
         selection.onMediaSet(mediaUri, apiSubs, prefsSubtitleUri);
         startTicking();
@@ -188,6 +209,7 @@ public class CustomSubtitleController
         }
         if (selection.hasOptions() && event.getAction() == KeyEvent.ACTION_DOWN
                 && event.getKeyCode() == KEY_OPEN_PANEL) {
+            logAction("panel: opened (CC key)");
             panel.open();
             return true;
         }
@@ -196,12 +218,16 @@ public class CustomSubtitleController
 
     /** Opens the panel if any subtitle option exists. Wired to the subtitle button. */
     public void openPanel() {
-        if (selection.hasOptions()) panel.open();
+        if (!selection.hasOptions()) return;
+        logAction("panel: opened (button)");
+        panel.open();
     }
 
     public void release() {
         ticking = false;
         SubtitleSettings.prefs(context).unregisterOnSharedPreferenceChangeListener(settingsListener);
+        if (player != null) player.removeListener(playbackLogger);
+        DebugLog.endSession();
         handler.removeCallbacksAndMessages(null);
         translation.release();
         autoSync.release();
@@ -221,7 +247,29 @@ public class CustomSubtitleController
 
     @Override public boolean isPlaying() { return player != null && player.isPlaying(); }
 
-    @Override public void onSyncChanged() { renderOverlay(); }
+    @Override public void onSyncChanged() {
+        logSyncState("changed");
+        renderOverlay();
+    }
+
+    /** Last sync state written, so holding the nudge key does not write a line per repeat. */
+    @Nullable private String lastLoggedSyncState;
+
+    /**
+     * The manual-sync state after something moved it. What is on screen is the subtitle plus this, so
+     * a "the subtitles are off by two seconds" report is only reproducible with the anchors and the
+     * nudge that produced it — including the offset auto-sync proposed and the user accepted, which
+     * lands here like any other change.
+     */
+    private void logSyncState(String what) {
+        if (!DebugLog.enabled()) return;
+        SyncState state = sync.getSession().state();
+        String rendered = what + " anchors=" + state.getAnchors().size() + " nudge=" + state.getNudgeMs() + "ms"
+                + (state.getAnchors().isEmpty() ? "" : " " + state.getAnchors());
+        if (rendered.equals(lastLoggedSyncState)) return;
+        lastLoggedSyncState = rendered;
+        DebugLog.log(DebugLog.CAT_SYNC, rendered);
+    }
 
     @Override public void onSeek(long deltaMs) {
         onSeekTo((player != null ? player.getCurrentPosition() : 0L) + deltaMs);
@@ -260,36 +308,48 @@ public class CustomSubtitleController
      * class javadoc). Everything else already has its {@code SubtitleFile} and starts immediately.
      */
     @Override public void onStartTranslate() {
+        logAction("translate: start");
         translation.start(currentPositionMs(), player != null ? player.getDuration() : 0L);
         pauseForActiveTranslateRun();
     }
 
-    @Override public void onCancelTranslate() { translation.cancel(); }
+    @Override public void onCancelTranslate() { logAction("translate: cancel"); translation.cancel(); }
 
-    @Override public void onPauseTranslate() { translation.pause(); }
+    @Override public void onPauseTranslate() { logAction("translate: pause"); translation.pause(); }
 
-    @Override public void onResumeTranslate() { translation.resume(); }
+    @Override public void onResumeTranslate() { logAction("translate: resume"); translation.resume(); }
+
+    /** A user action, with the playhead — half the auto-sync and translation events only make sense
+     *  relative to where playback was when the button was pressed. */
+    private void logAction(String what) {
+        DebugLog.log(DebugLog.CAT_UI, () -> what + " (at " + currentPositionMs() + "ms)");
+    }
 
     // Discards the cached translation too — "Restore Original" reading as final, not as "hide it for
     // now": leaving a translated chip on screen after explicitly asking for the original back would
     // be misleading, and translateAgain()/re-selecting always pays to translate fresh either way.
     @Override public void onRestoreOriginal() {
+        logAction("translate: restore original (drops the cached translation)");
         translation.forgetCachedTranslation();
         translation.restoreOriginal();
         selection.refresh(); // the "Translated" chip needs the option list re-evaluated to drop
     }
 
     @Override public void onTranslateAgain() {
+        logAction("translate: again (forgets the stored translation first)");
         translation.translateAgain(currentPositionMs(), player != null ? player.getDuration() : 0L);
         pauseForActiveTranslateRun();
     }
 
     @Override public void onRetryMissing() {
+        logAction("translate: retry missing lines");
         translation.retryMissing(currentPositionMs(), player != null ? player.getDuration() : 0L);
         pauseForActiveTranslateRun();
     }
 
     @Override public void onStartAutoSync(boolean fromHere) {
+        logAction("auto-sync: start " + (fromHere ? "from here" : "from start")
+                + (needsExtraction() ? " (extracting the embedded track first)" : ""));
         if (needsExtraction()) {
             SubtitleOption requested = selectedOption;
             embedded.ensureExtracted(requested, file -> {
@@ -365,7 +425,11 @@ public class CustomSubtitleController
     }
 
     // Same reasoning as onCancelTranslate(): onStartAutoSync() can leave an extraction in flight.
-    @Override public void onCancelAutoSync() { embedded.cancel(); autoSync.cancel(); }
+    @Override public void onCancelAutoSync() {
+        logAction("auto-sync: cancel");
+        embedded.cancel();
+        autoSync.cancel();
+    }
 
     /**
      * The Sync screen stopped being shown (see {@link SubtitlePanel.Callbacks#onLeavingSync}) —
@@ -382,8 +446,12 @@ public class CustomSubtitleController
         SubtitleCache cache = embedded.cache();
         if (current.equals(SyncState.empty())) {
             cache.removeSyncState(key); // no-op if nothing was stored
+            DebugLog.log(DebugLog.CAT_SYNC, "left Sync — state empty, cleared from cache under " + key);
         } else if (!current.equals(cache.getSyncState(key))) {
             cache.putSyncState(key, current);
+            logSyncState("left Sync — saved under " + key + ":");
+        } else {
+            DebugLog.log(DebugLog.CAT_SYNC, "left Sync — unchanged, nothing written");
         }
         selection.refresh(); // "Synced" chip
     }
@@ -415,6 +483,7 @@ public class CustomSubtitleController
      * RUNNING.
      */
     @Override public void onEnteringTranslate() {
+        logAction("panel: entered Translate");
         wasPlayingBeforeTranslatePause = null;
         pauseForActiveTranslateRun();
     }
@@ -422,6 +491,7 @@ public class CustomSubtitleController
     /** The Translate screen just stopped being shown — restores whatever paused playback for this
      *  reason, whether that was {@link #onEnteringTranslate()} or a later {@link #pauseForActiveTranslateRun()}. */
     @Override public void onLeavingTranslate() {
+        logAction("panel: left Translate");
         Boolean wasPlaying = wasPlayingBeforeTranslatePause;
         wasPlayingBeforeTranslatePause = null;
         if (wasPlaying != null && wasPlaying && player != null) player.play();
@@ -431,6 +501,8 @@ public class CustomSubtitleController
 
     @Override public void onSubtitleLoaded(SubtitleFile file, SubtitleOption option) {
         ActiveSubtitle active = new ActiveSubtitle(option, file, embedded.keyFor(option));
+        DebugLog.log(DebugLog.CAT_SUBS, () -> "loaded " + SubtitleDebugFormat.option(option)
+                + " cues=" + file.getEntries().size() + " cacheKey=" + active.cacheKey);
 
         // Set explicitly here, off `active.cacheKey` — deliberately NOT left for onOptionsChanged()'s
         // own translation.setCache(embedded.cache(), embedded.keyFor(selectedOption)) call to handle:
@@ -479,12 +551,17 @@ public class CustomSubtitleController
     private void activateOverlay(SubtitleFile file, @Nullable String cacheKey) {
         SyncState saved = cacheKey != null ? embedded.cache().getSyncState(cacheKey) : null;
         sync.setSubtitle(file);
-        if (saved != null) sync.getSession().restoreState(saved);
+        lastLoggedSyncState = null; // a fresh subtitle starts from a fresh sync state
+        if (saved != null) {
+            sync.getSession().restoreState(saved);
+            logSyncState("restored from cache under " + cacheKey + ":");
+        }
         panel.setSyncSession(sync.getSession());
         renderOverlay();
     }
 
     @Override public void onSubtitleCleared() {
+        DebugLog.log(DebugLog.CAT_SUBS, "overlay cleared (rendering handed back to Media3)");
         sync.clear();
         panel.setSyncSession(sync.getSession());
         translation.setSource(null, null);
@@ -527,7 +604,32 @@ public class CustomSubtitleController
         }
         translation.setSelectedOption(selectedOption, selection.mediaTitle());
         translation.setCache(embedded.cache(), embedded.keyFor(selectedOption));
+        logOptions(options, selectedId, selectionChanged);
         panel.setOptions(options, selectedId, loadingMore);
+    }
+
+    /** Last option list written to the debug log, to keep {@link #refresh}-driven rebuilds from
+     *  repeating an unchanged list on every chip update. */
+    @Nullable private String lastLoggedOptions;
+
+    /**
+     * The two things a report needs from the selector: everything that was on offer, and which one is
+     * active. Written only when either actually changed — {@code onOptionsChanged} fires on every
+     * refresh (a chip, a cache write, a failed load), and an unchanged list repeated twenty times
+     * would bury the events around it.
+     */
+    private void logOptions(List<SubtitleOption> options, @Nullable String selectedId, boolean selectionChanged) {
+        if (!DebugLog.enabled()) return;
+        String rendered = SubtitleDebugFormat.options(options, selectedId);
+        if (!rendered.equals(lastLoggedOptions)) {
+            lastLoggedOptions = rendered;
+            DebugLog.log(DebugLog.CAT_SUBS, rendered);
+        }
+        if (selectionChanged) {
+            DebugLog.log(DebugLog.CAT_SUBS, selectedOption != null
+                    ? "selection -> " + SubtitleDebugFormat.option(selectedOption)
+                    : "selection -> none");
+        }
     }
 
     /**
@@ -581,8 +683,17 @@ public class CustomSubtitleController
         handler.postDelayed(this::tick, POLL_MS);
     }
 
+    /** The media's duration only exists once the player has prepared, which is well after
+     *  {@link #onMediaSet} — see {@code DebugLog.startSession}. This is the first place that already
+     *  runs afterwards on a timer, so it is where the header's missing number gets filled in. */
+    private boolean durationLogged;
+
     private void tick() {
         if (!ticking) return;
+        if (!durationLogged && DebugLog.enabled() && player != null && player.getDuration() > 0) {
+            durationLogged = true;
+            DebugLog.log(DebugLog.CAT_SESSION, "duration " + (player.getDuration() / 1000) + "s");
+        }
         renderOverlay();
         translation.renderIndicator(panel.isOpen(), currentPositionMs());
         autoSync.renderIndicator(panel.isOpen());

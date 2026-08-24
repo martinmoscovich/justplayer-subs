@@ -457,6 +457,40 @@ final class ChunkTimelineTracker {
 
     /** Overall completion, 0-100 — the sum of DONE segment durations over the whole timeline, not a
      *  chunk count (chunks vary wildly in duration, so "2/5 chunks" reads nothing like "2/5 of the video"). */
+    /**
+     * The bar as one line, for the debug log: every segment's span, state, and whether its end is
+     * still an estimate. Lives here rather than in the debug package because {@link ChunkProgressBarView.Segment}'s
+     * fields are package-private, and because this is the class that builds the model in the first
+     * place — a formatter that drifts from the builder would describe a bar nobody is looking at.
+     *
+     * <p>This is the only record of the estimated→real transition. The model is rebuilt from scratch
+     * on every render tick and never persisted, so without a line here there is no way, after the
+     * fact, to tell a bar that guessed twelve segments and settled on seven from one that always knew.
+     * The caller writes it only when the rendering changes — see {@code TranslationController.logBarModel}.
+     */
+    static String describe(ChunkProgressBarView.Model model) {
+        StringBuilder sb = new StringBuilder("segments=").append(model.segments.size())
+                .append(" total=").append(model.totalDurationMs).append("ms");
+        for (ChunkProgressBarView.Segment seg : model.segments) {
+            sb.append("\n    ").append(formatMs(seg.startMs)).append('-').append(formatMs(seg.endMs))
+                    .append(' ').append(seg.state)
+                    .append(seg.endEstimated ? " ~estimated" : " real")
+                    .append(seg.backgroundPass ? " background" : "");
+            if (seg.state == ChunkProgressBarView.SegmentState.EXTRACTING) {
+                // Rounded to 5%: this fill advances continuously, and at 1% granularity the caller's
+                // "log it when the drawing changes" rule would write a hundred lines per segment.
+                sb.append(" fill=").append(Math.round(seg.extractingFill * 20) * 5).append('%');
+            }
+            if (seg.label != null) sb.append(" label='").append(seg.label).append('\'');
+        }
+        return sb.toString();
+    }
+
+    private static String formatMs(long ms) {
+        long totalSeconds = Math.max(0, ms) / 1000;
+        return String.format(Locale.US, "%d:%02d", totalSeconds / 60, totalSeconds % 60);
+    }
+
     static int percentDone(ChunkProgressBarView.Model model) {
         if (model.totalDurationMs <= 0) return 0;
         long doneMs = 0;

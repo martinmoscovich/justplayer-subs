@@ -20,6 +20,7 @@ import java.util.Locale;
 import java.util.function.Consumer;
 
 import com.brouken.player.R;
+import com.brouken.player.subs.debug.DebugLog;
 import com.brouken.player.subs.ui.SubsPill;
 import com.brouken.player.subs.ui.SubsTheme;
 
@@ -173,6 +174,9 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         detailedBar.setModel(model);
         lastPositionMs = currentPositionMs;
         lastModel = model;
+        // The one call that already builds the model on every tick, so the one place that can see the
+        // bar change — including estimated boundaries becoming real ones.
+        logBarModel(model);
         // While the panel is up and something is running, the second line of WATCHABLE UP TO counts
         // down in real time — that is the whole point of measuring it from the playhead.
         if (panelOpen && showRunning) pushState();
@@ -233,9 +237,18 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
      * identity (unknown media) and simply runs uncached.
      */
     public void setCache(subtitleengine.cache.SubtitleCache cache, @Nullable String subtitleKey) {
+        // Which key a run reads and writes under decides whether work already paid for is found. A
+        // translation that "started over from scratch" is usually this key having changed, not the
+        // cache having lost anything — see EmbeddedSubtitleController.HASH_CACHE's javadoc.
+        if (!java.util.Objects.equals(subtitleKey, debugCacheKey)) {
+            debugCacheKey = subtitleKey;
+            DebugLog.log(DebugLog.CAT_CACHE, "translation cache key -> " + subtitleKey);
+        }
         session.setCache(cache, subtitleKey);
         pushState();
     }
+
+    @Nullable private String debugCacheKey;
 
     /**
      * "Retry missing lines": start again <em>without</em> dropping the stored translation, so the
@@ -297,13 +310,28 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
      *                       known; the translation itself doesn't need it.
      */
     public void start(long positionMs, long videoDurationMs) {
-        if (!canTranslate()) return;
+        if (!canTranslate()) {
+            DebugLog.log(DebugLog.CAT_TRANSLATE, () -> "start refused: " + reasonUnavailable());
+            return;
+        }
+        DebugLog.log(DebugLog.CAT_TRANSLATE, () -> "start target=" + targetLanguage()
+                + " provider=" + SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_PROVIDER, "(unset)")
+                + " model=" + SubtitleSettings.getString(context, SubtitleSettings.KEY_AI_MODEL, "(unset)")
+                + " source=" + (source != null ? "known(" + source.getEntries().size() + " lines)"
+                        : "embedded track, not extracted yet")
+                + " from=" + positionMs + "ms duration=" + videoDurationMs + "ms");
         // Pick up a provider/model/key edited since the last run. Here and not per completion: a run
         // must not change model halfway through. See SettingsTranslationClient.
         client.refresh();
         toastedForRun = false;
         lastProgress = null;
         indicatorTerminalText = null;
+        debugActiveChunks.clear();
+        debugChunkErrors.clear();
+        debugLastStatus = null;
+        debugSourceState = null;
+        debugSourceStep = -1;
+        debugBarModel = null;
 
         List<SubtitleEntry> exactEntries = null;
         if (source == null && isExtractableSelected()) {
@@ -357,6 +385,10 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     @Nullable
     public SubtitleFile loadCompleteFromCache(long videoDurationMs) {
         SubtitleFile result = session.loadCompleteFromCache(targetLanguage());
+        DebugLog.log(DebugLog.CAT_TRANSLATE, () -> result != null
+                ? "complete cache hit for " + targetLanguage() + ": " + result.getEntries().size()
+                        + " lines applied without a run"
+                : "no complete cached translation for " + targetLanguage());
         if (result != null) {
             timeline.reset(videoDurationMs, 0L, result.getEntries());
             lastProgress = new TranslationProgress(RunStatus.DONE, 0, 0, 0, 0, 0, 0L, List.of(),
@@ -389,6 +421,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     /** Drops the cached translation for the current target language — see the caller
      *  ({@link CustomSubtitleController#onRestoreOriginal}) for why "Restore Original" does this. */
     public void forgetCachedTranslation() {
+        DebugLog.log(DebugLog.CAT_TRANSLATE, () -> "forgetting the cached translation for " + targetLanguage());
         session.forgetTranslation(targetLanguage());
     }
 
@@ -496,9 +529,148 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         lastProgress = progress;
         timeline.onProgress(progress);
         logProgress(progress);
+        logDebugProgress(progress);
         pushState();
         maybeToast(progress);
         updateIndicatorTerminalFlash(progress);
+    }
+
+    // --- debug log ---
+
+    /** Chunk indices in flight and the retry count last reported for each, so a chunk is logged once
+     *  when it starts, again whenever it retries, and once when it leaves. */
+    private final java.util.Map<Integer, Integer> debugActiveChunks = new java.util.LinkedHashMap<>();
+    /** Chunk errors already reported, keyed by chunk — the engine's map keeps a failure until that
+     *  same chunk succeeds, so without this every callback would repeat it. */
+    private final java.util.Map<Integer, String> debugChunkErrors = new java.util.HashMap<>();
+    @Nullable private RunStatus debugLastStatus;
+
+    /**
+     * The run as a sequence of events rather than a state to render: status transitions, each chunk
+     * entering and leaving flight, each new failure with its reason, and the totals at the end.
+     *
+     * <p>Complements the engine's own per-chunk lines (captured through {@code EngineLogBridge}) — the
+     * engine reports what a chunk cost, this reports where it sits on the video timeline, which is
+     * what a "the subtitles go untranslated around 40 minutes in" report is checked against.
+     */
+    private void logDebugProgress(TranslationProgress p) {
+        if (!DebugLog.enabled()) return;
+
+        if (p.getStatus() != debugLastStatus) {
+            debugLastStatus = p.getStatus();
+            DebugLog.log(DebugLog.CAT_TRANSLATE, "status " + p.getStatus()
+                    + (p.isStreaming() ? " (streaming: source still being extracted)" : ""));
+        }
+
+        logStreamingSource(p);
+
+        java.util.Set<Integer> current = new java.util.HashSet<>();
+        for (ChunkProgress c : p.getActiveChunks()) {
+            current.add(c.getIndex());
+            Integer knownRetries = debugActiveChunks.put(c.getIndex(), c.getRetries());
+            if (knownRetries == null) {
+                DebugLog.log(DebugLog.CAT_TRANSLATE, String.format(Locale.US,
+                        "chunk=%d start lines=%d-%d t=%s-%s retries=%d",
+                        c.getIndex(), c.getFirstEntry(), c.getLastEntry(),
+                        formatDuration(c.getStartMs()), formatDuration(c.getEndMs()), c.getRetries()));
+            } else if (knownRetries != c.getRetries()) {
+                // A climbing count while the chunk is still in flight is the difference between "this
+                // is slow" and "this one is fighting the model" — invisible if only read at start.
+                DebugLog.log(DebugLog.CAT_TRANSLATE, "chunk=" + c.getIndex() + " retry " + c.getRetries());
+            }
+        }
+        // Leaving the in-flight set is the only signal a chunk finished. Reported here rather than
+        // left to the engine's own "chunk[i/n] ok" line: that line is the engine's to change, and
+        // without this the log would show every chunk starting and none ending.
+        for (java.util.Iterator<Integer> it = debugActiveChunks.keySet().iterator(); it.hasNext(); ) {
+            Integer index = it.next();
+            if (current.contains(index)) continue;
+            it.remove();
+            DebugLog.log(DebugLog.CAT_TRANSLATE, "chunk=" + index + " done"
+                    + (p.getChunkErrors().containsKey(index) ? " (failed)" : "")
+                    + " — completed=" + p.getCompletedChunks() + " failed=" + p.getFailedChunks()
+                    + " readyUntil=" + formatDuration(p.getReadyUntilMs()));
+        }
+
+        for (java.util.Map.Entry<Integer, String> e : p.getChunkErrors().entrySet()) {
+            if (!e.getValue().equals(debugChunkErrors.put(e.getKey(), e.getValue()))) {
+                DebugLog.log(DebugLog.CAT_TRANSLATE,
+                        "chunk=" + e.getKey() + " FAILED reason=\"" + e.getValue() + "\"");
+            }
+        }
+        debugChunkErrors.keySet().retainAll(p.getChunkErrors().keySet()); // a retry that succeeded
+
+        if (p.getStatus() == RunStatus.DONE || p.getStatus() == RunStatus.ERROR) {
+            DebugLog.log(DebugLog.CAT_TRANSLATE, p.getStatus() + " chunks=" + p.getCompletedChunks()
+                    + "/" + p.getTotalChunks() + " failed=" + p.getFailedChunks()
+                    + " untranslated=" + p.getUntranslatedEntries()
+                    + " reused=" + session.reusedEntries()
+                    + " " + describeStats(p.getStats())
+                    + (p.getErrorMessage() != null ? " error=\"" + p.getErrorMessage() + "\"" : ""));
+        }
+    }
+
+    @Nullable private TranslationProgress.SourceState debugSourceState;
+    private int debugSourceStep = -1;
+
+    /**
+     * The extraction half of a streaming run — a track being read out of the container while chunks
+     * translate behind it.
+     *
+     * <p>It has to be reported from here and not from {@link EmbeddedSubtitleController}, which is
+     * where the rest of the {@code EXTRACT-SUBS} lines come from: {@link #start} routes a
+     * not-yet-extracted track through {@code embedded.streamingFactoryFor(...)} into <em>this</em>
+     * class's own session, so that controller's listener never fires for this path and its logging
+     * sits idle. Found exactly that way — a full streaming translate produced not one extraction line.
+     *
+     * <p>Throttled to deciles of the container read plus every {@code sourceState} flip: the source
+     * reports far more often than that, and the point of these lines is the shape of the read (is it
+     * keeping ahead of translation, at what speed, with what ETA), not its every increment.
+     */
+    private void logStreamingSource(TranslationProgress p) {
+        if (!p.isStreaming()) return;
+        if (p.getSourceState() != debugSourceState) {
+            debugSourceState = p.getSourceState();
+            // WAITING means translation has caught up with the read and is idling for the next chunk's
+            // worth of entries — the thing to look for when a run is slower than the API alone explains.
+            DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, "source " + debugSourceState);
+        }
+        int step = (int) (Math.max(0.0, Math.min(1.0, p.getSourceFraction())) * 10);
+        if (step == debugSourceStep) return;
+        debugSourceStep = step;
+        DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, String.format(Locale.US,
+                "reading %d%% of the container · content up to %s · %s · next chunk %s",
+                step * 10, formatDuration(p.getExtractedContentMs()),
+                p.getExtractionSpeedFactor() >= 0
+                        ? String.format(Locale.US, "%.1fx real time", p.getExtractionSpeedFactor())
+                        : "speed not measurable yet",
+                p.getEtaMs() >= 0 ? "in ~" + formatDuration(p.getEtaMs()) : "ETA unknown"));
+    }
+
+    /** Last bar rendering written, so a bar that is not changing writes nothing on the 100ms tick. */
+    @Nullable private String debugBarModel;
+
+    /**
+     * The chunk bar as it is actually drawn, written only when the drawing changes. This is the one
+     * place the estimated→real transition is recorded: {@link ChunkTimelineTracker} rebuilds the model
+     * from scratch every tick and persists nothing, so a bar that guessed twelve segments and settled
+     * on seven leaves no trace anywhere else.
+     */
+    private void logBarModel(ChunkProgressBarView.Model model) {
+        if (!DebugLog.enabled()) return;
+        String rendered = ChunkTimelineTracker.describe(model);
+        if (rendered.equals(debugBarModel)) return;
+        debugBarModel = rendered;
+        DebugLog.log(DebugLog.CAT_BAR, rendered);
+    }
+
+    /** Tokens and money are per <em>run</em>, not per chunk — {@link TranslationStats} is cumulative,
+     *  so a chunk's own share is the delta between two of these lines, not a field. */
+    private static String describeStats(@Nullable TranslationStats st) {
+        if (st == null) return "stats=none";
+        return String.format(Locale.US, "tokens=%d/%d cost=%s elapsed=%ds",
+                st.getInputTokens(), st.getOutputTokens(),
+                st.getCostUsd() != null ? formatCost(st.getCostUsd()) : "?", st.getElapsedMs() / 1000);
     }
 
     // --- logging / toasts (§4: all three failure cases must reach the user and the logs) ---

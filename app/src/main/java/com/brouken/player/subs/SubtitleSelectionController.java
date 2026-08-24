@@ -35,6 +35,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+import com.brouken.player.subs.debug.DebugLog;
+import com.brouken.player.subs.debug.SubtitleDebugFormat;
+
 import okhttp3.OkHttpClient;
 import subtitleengine.cache.SubtitleCache;
 import subtitleengine.core.SubtitlePriorityResolver;
@@ -263,6 +266,8 @@ public class SubtitleSelectionController {
         // the one the user made, which is exactly the one you need when reproducing a report.
         android.util.Log.i(TAG, "manually selected " + (opt != null
                 ? "'" + opt.label + "' (" + opt.source + ", lang=" + opt.language + ")" : id));
+        DebugLog.log(DebugLog.CAT_SUBS, () -> "manual pick: "
+                + (opt != null ? SubtitleDebugFormat.option(opt) : id));
         applySelection(id);
     }
 
@@ -293,6 +298,8 @@ public class SubtitleSelectionController {
         promoteSelectedToOverlay();
         listener.onSubtitleLoaded(file, opt);
         android.util.Log.i(TAG, "embedded track promoted to overlay: " + file.getEntries().size() + " cues");
+        DebugLog.log(DebugLog.CAT_SUBS, () -> "embedded track promoted to our overlay: "
+                + file.getEntries().size() + " cues · " + SubtitleDebugFormat.option(opt));
     }
 
     /**
@@ -337,6 +344,8 @@ public class SubtitleSelectionController {
                 manuallySelected = true;
                 android.util.Log.i(TAG, "restored last-active selection '" + remembered.label + "' ("
                         + remembered.source + ", lang=" + remembered.language + ")");
+                DebugLog.log(DebugLog.CAT_SUBS, () -> "restored last-active: "
+                        + SubtitleDebugFormat.option(remembered));
                 applySelection(rememberedId);
                 return;
             }
@@ -368,6 +377,10 @@ public class SubtitleSelectionController {
         android.util.Log.i(TAG, "auto-selected '" + winner.label + "' (" + winner.source + ", lang="
                 + winner.language + ", preferred=" + decision.preferredLanguage + ") over "
                 + (selectedId != null ? selectedId : "nothing"));
+        String previouslySelected = selectedId;
+        DebugLog.log(DebugLog.CAT_SUBS, () -> "auto-selected (preferredLanguage="
+                + decision.preferredLanguage + ") over " + (previouslySelected != null ? previouslySelected : "nothing")
+                + ": " + SubtitleDebugFormat.option(winner));
         // Still auto-selects the better source — only the repeat notice is suppressed.
         if (!(decision.preferredLanguage && notifiedPreferredFound)) {
             pendingAutoNoticeId = winner.id;
@@ -552,6 +565,8 @@ public class SubtitleSelectionController {
                         if (fromCache) {
                             android.util.Log.i(TAG, "cache hit for '" + opt.label + "': "
                                     + file.getEntries().size() + " cues");
+                            DebugLog.log(DebugLog.CAT_SUBS, () -> "cache hit " + SubtitleDebugFormat.origin(opt)
+                                    + ": " + file.getEntries().size() + " cues");
                         }
                         onExternalLoaded(opt, file);
                     }
@@ -573,6 +588,8 @@ public class SubtitleSelectionController {
         // opt.uri is null for provider results — log the label instead of a bare "null".
         android.util.Log.i(TAG, "subtitle active: " + file.getEntries().size() + " cues from "
                 + (opt.uri != null ? opt.uri : opt.label) + (opt.fromCache ? " (cached)" : ""));
+        DebugLog.log(DebugLog.CAT_SUBS, () -> "active: " + file.getEntries().size() + " cues · "
+                + SubtitleDebugFormat.option(opt));
         // After onSubtitleLoaded: the host decides whether to offer Translate, and that answer
         // depends on the source it was just given.
         notifyAutoSelected(opt);
@@ -584,6 +601,7 @@ public class SubtitleSelectionController {
         refresh();
         // Log the throwable: the message alone drops the cause, and the row only renders a "⚠".
         android.util.Log.w(TAG, "failed to load subtitle '" + opt.label + "'", e);
+        DebugLog.log(DebugLog.CAT_SUBS, () -> "load FAILED " + SubtitleDebugFormat.option(opt) + " — " + e);
         // The failed option is out of the running now — let the runner-up take over. A manual pick
         // stays selected even after failing, so the panel keeps showing which row is the broken one.
         if (!manuallySelected && opt.id.equals(selectedId)) {
@@ -605,6 +623,8 @@ public class SubtitleSelectionController {
         SearchLanguages langs = searchLanguages();
         loadingMore = true;
         refresh();
+        DebugLog.log(DebugLog.CAT_SUBS, "OpenSubtitles search: title='" + title + "' langs=" + langs
+                + " hash=" + mediaHash + " size=" + mediaBytes);
 
         new Thread(() -> {
             SubtitleProvider provider = new OpenSubtitlesProvider(apiKey, OpenSubtitlesHttp.client());
@@ -637,6 +657,7 @@ public class SubtitleSelectionController {
         loadingMore = false;
         refresh();
         android.util.Log.i(TAG, "OpenSubtitles: " + providerOptions.size() + " results");
+        DebugLog.log(DebugLog.CAT_SUBS, "OpenSubtitles: " + providerOptions.size() + " results");
         // New candidates: a target-language result can outrank whatever is playing right now — or, if
         // nothing has been selected yet, be the remembered last-active option finally showing up.
         autoSelectOrRestoreLastActive();
@@ -648,6 +669,7 @@ public class SubtitleSelectionController {
         // Throwable, not e.getMessage(): the message alone drops the cause and the stack trace, and
         // this failure is otherwise invisible — the list just renders as empty.
         android.util.Log.w(TAG, "OpenSubtitles search failed", e);
+        DebugLog.log(DebugLog.CAT_SUBS, "OpenSubtitles search FAILED — " + e);
         // Called on the main thread (posted from the search worker), so the Toast is safe here.
         Toast.makeText(context,
                 context.getString(R.string.subtitle_provider_search_failed),

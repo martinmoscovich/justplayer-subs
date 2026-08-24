@@ -15,6 +15,8 @@ import java.util.Map;
 import java.util.concurrent.ThreadFactory;
 import java.util.function.Consumer;
 
+import com.brouken.player.subs.debug.DebugLog;
+
 import subtitleengine.cache.CachePolicy;
 import subtitleengine.cache.CachedSubtitle;
 import subtitleengine.cache.SubtitleCache;
@@ -164,6 +166,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         if (cachedHashAndSize != null) {
             videoHash = cachedHashAndSize[0];
             Log.i(TAG, "media hash reused from an earlier hash of this URI this process — no re-read");
+            DebugLog.log(DebugLog.CAT_SESSION, "media hash reused (no re-read): " + videoHash);
             if (onHashReady != null) onHashReady.accept(cachedHashAndSize[1]);
             return;
         }
@@ -180,6 +183,9 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
                 if (hashAndSize != null) HASH_CACHE.put(mediaUri.toString(), hashAndSize);
                 Log.i(TAG, "media hash " + (videoHash != null ? "ready" : "unavailable — falling back to URI-based cache key")
                         + " after " + elapsedMs + "ms");
+                DebugLog.log(DebugLog.CAT_SESSION, "media hash "
+                        + (videoHash != null ? videoHash : "unavailable (URI-based cache key)")
+                        + " size=" + (hashAndSize != null ? hashAndSize[1] : "?") + " in " + elapsedMs + "ms");
                 if (onHashReady != null) {
                     onHashReady.accept(hashAndSize == null ? null : hashAndSize[1]);
                 }
@@ -245,6 +251,8 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
             lastWasFromCache = false;
             Log.i(TAG, "extracting embedded track " + option.embeddedTextIndex + " ('" + option.label
                     + "') · cacheKey=" + keyFor(option));
+            DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, () -> "start track=" + option.embeddedTextIndex
+                    + " label='" + option.label + "' lang=" + option.language + " cacheKey=" + keyFor(option));
         }, new Callback() {
             @Override public void onLoaded(SubtitleFile file, boolean fromCache) {
                 lastWasFromCache = fromCache;
@@ -284,6 +292,9 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         if (hit == null || hit.entryCount() == 0 || !hit.isComplete()) return null;
         Log.i(TAG, "cache hit for track " + option.embeddedTextIndex + ": "
                 + hit.entryCount() + " cues, stored " + ageDescription(hit.getStoredAtMs()));
+        DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, "cache hit track=" + option.embeddedTextIndex
+                + " cues=" + hit.entryCount() + " stored=" + ageDescription(hit.getStoredAtMs())
+                + " key=" + key);
         cachedOptionId = option.id;
         cachedFile = hit.getSubtitle();
         lastWasFromCache = true;
@@ -294,6 +305,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
     public void fetchAndStore(SubtitleOption option, Callback callback) {
         pendingCallback = callback;
         lastEmittedFile = null;
+        lastLoggedSourceStep = -1;
         EntrySource source = extractingSourceFor(option);
         session.setSource(source, option.language, null);
         session.setCache(cache, keyFor(option));
@@ -330,6 +342,10 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
                 && partial.getCoveredUpToMs() > 0 && partial.entryCount() > 0)
                 ? partial.getSubtitle().getEntries() : List.of();
         long resumeFromMs = (partial != null && !partial.isComplete()) ? partial.getCoveredUpToMs() : 0L;
+        if (resumeFromMs > 0) {
+            DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, "resuming from a cached partial: "
+                    + cachedPrefix.size() + " cues covering up to " + resumeFromMs + "ms");
+        }
         return new ExtractingEntrySource(new Media3EmbeddedSubtitleProvider(context, headers.get()),
                 mediaUri.toString(), option.embeddedTextIndex, option.language,
                 cachedPrefix, resumeFromMs, THREAD_FACTORY);
@@ -411,6 +427,7 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
         switch (progress.getStatus()) {
             case RUNNING:
                 notifyStatus("Reading subtitles from the video", (float) progress.getSourceFraction());
+                logRunning(progress);
                 break;
             case DONE:
                 SubtitleFile file = lastEmittedFile;
@@ -418,29 +435,49 @@ public class EmbeddedSubtitleController implements SubtitleRetriever, SubtitlePi
                 if (file == null || file.getEntries().isEmpty()) {
                     // Not an exception, but not usable either — and silence here would look like a hang.
                     Log.w(TAG, "extraction finished with no cues");
+                    DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, "done but no readable cues");
                     toast("That embedded track has no readable subtitles");
                     failPending("no readable subtitles");
                     return;
                 }
                 Log.i(TAG, "extraction done: " + file.getEntries().size() + " cues");
+                DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, () -> "done cues=" + file.getEntries().size()
+                        + " contentUpTo=" + progress.getExtractedContentMs() + "ms");
                 Callback loadedCallback = pendingCallback;
                 clearPending();
                 if (loadedCallback != null) loadedCallback.onLoaded(file, false);
                 break;
             case CANCELLED:
                 notifyStatus(null);
+                DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, "cancelled");
                 clearPending();
                 break;
             case ERROR:
                 notifyStatus(null);
                 // The throwable, not just its message: this is the only place the cause survives.
                 Log.w(TAG, "extraction failed", progress.getError());
+                DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, "ERROR " + progress.getErrorMessage()
+                        + (progress.getError() != null ? " (" + progress.getError() + ")" : ""));
                 toast("Could not read the embedded subtitle: " + progress.getErrorMessage());
                 failPending(progress.getErrorMessage());
                 break;
             default:
                 break;
         }
+    }
+
+    /** Last decile of the container read that was written, so a long read leaves a trail without
+     *  one line per progress callback (the provider reports every 0.5%). */
+    private int lastLoggedSourceStep = -1;
+
+    private void logRunning(TranslationProgress progress) {
+        if (!DebugLog.enabled()) return;
+        int step = (int) (progress.getSourceFraction() * 10);
+        if (step == lastLoggedSourceStep) return;
+        lastLoggedSourceStep = step;
+        DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, "reading " + (step * 10) + "% (content up to "
+                + progress.getExtractedContentMs() + "ms, "
+                + String.format(Locale.US, "%.1fx", progress.getExtractionSpeedFactor()) + " real time)");
     }
 
     private void clearPending() {

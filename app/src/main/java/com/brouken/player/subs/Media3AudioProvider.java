@@ -32,6 +32,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import com.brouken.player.subs.debug.DebugLog;
+
 import subtitleengine.audio.AudioProvider;
 import subtitleengine.audio.PcmDownmixResampler;
 import subtitleengine.vad.ResyncProgressListener;
@@ -105,6 +107,10 @@ public class Media3AudioProvider implements AudioProvider {
                                        @Nullable ResyncProgressListener onProgress) {
         long startUs = (long) (startSeconds * 1_000_000);
         long endUs = startUs + (long) (durationSeconds * 1_000_000);
+        long startedAtMs = System.currentTimeMillis();
+        DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, () -> String.format(Locale.US,
+                "request start=%.1fs duration=%.1fs headers=%d source=%s",
+                startSeconds, durationSeconds, headers == null ? 0 : headers.size(), describe(source)));
         Uri uri = Uri.parse(source);
         DataSource dataSource = Media3ExtractorSource.createDataSource(context, headers, uri);
         Extractor extractor = null;
@@ -148,6 +154,12 @@ public class Media3AudioProvider implements AudioProvider {
             Format format = audio.format;
             Log.i(TAG, "extractAudioSegment: audio track " + format.sampleMimeType + " "
                     + format.channelCount + "ch @" + format.sampleRate + "Hz in " + describe(source));
+            // The *first* audio track in the container, not the one being listened to (see
+            // AudioSink.endTracks). On a multi-audio file that difference is the first thing to check
+            // when auto-sync lands on a confident but wrong offset — compare against the [AUDIO] line.
+            DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, () -> "track (first in container) "
+                    + format.sampleMimeType + " " + format.channelCount + "ch @" + format.sampleRate
+                    + "Hz id=" + format.id + " lang=" + format.language);
 
             if (MimeTypes.AUDIO_RAW.equals(format.sampleMimeType)) {
                 // Nothing to decode — but PcmDownmixResampler consumes interleaved 16-bit LE only, so
@@ -173,10 +185,16 @@ public class Media3AudioProvider implements AudioProvider {
             SeekMap seekMap = sink.seekMap;
             if (startUs > 0 && seekMap != null && seekMap.isSeekable()) {
                 SeekMap.SeekPoints points = seekMap.getSeekPoints(startUs);
+                // The sync point landed on, not the position asked for: the gap between them is lead-in
+                // the decode loop then drops, and an unexpectedly large one explains a short window.
+                DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, () -> String.format(Locale.US,
+                        "seek: asked %.1fs -> sync point %.1fs (byte %d)",
+                        startUs / 1_000_000.0, points.first.timeUs / 1_000_000.0, points.first.position));
                 input = Media3ExtractorSource.openAt(dataSource, uri, points.first.position);
                 extractor.seek(points.first.position, points.first.timeUs);
                 audio.reset();
             } else if (startUs > 0) {
+                DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, "source is not seekable — reading forward from 0s");
                 // Not seekable: the loop below still lands on the right window, it just has to read
                 // (and drop) everything before it.
                 Log.w(TAG, "extractAudioSegment: source is not seekable, reading forward to "
@@ -194,14 +212,20 @@ public class Media3AudioProvider implements AudioProvider {
             Log.i(TAG, String.format(Locale.US,
                     "extract: requested start=%.1fs duration=%.1fs -> delivered %.1fs (%d samples)",
                     startSeconds, durationSeconds, deliveredSeconds, result == null ? 0 : result.length));
+            DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, () -> String.format(Locale.US,
+                    "delivered %.1fs of %.1fs requested (%d samples @%dHz mono) in %dms",
+                    deliveredSeconds, durationSeconds, result == null ? 0 : result.length, TARGET_RATE,
+                    System.currentTimeMillis() - startedAtMs));
             if (result != null && onProgress != null) {
                 onProgress.onProgress(ResyncProgressListener.Phase.EXTRACTING, 1.0);
             }
             return result;
         } catch (UnsupportedAudioTrackException e) {
+            DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, "unsupported: " + e.getMessage());
             throw e; // has a specific, user-facing reason — let it propagate instead of collapsing to null
         } catch (Exception e) {
             Log.e(TAG, "extractAudioSegment: failed for " + describe(source), e);
+            DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, "failed: " + e);
             return null;
         } finally {
             if (decoder != null) {
@@ -243,6 +267,7 @@ public class Media3AudioProvider implements AudioProvider {
         while (!outputDone) {
             if (Thread.currentThread().isInterrupted()) {
                 Log.w(TAG, "decodeAndResample: interrupted, aborting extraction");
+                DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, "aborted: interrupted (cancelled)");
                 return null;
             }
             boolean progressed = false;
@@ -327,6 +352,8 @@ public class Media3AudioProvider implements AudioProvider {
             } else if (++staleIterations > MAX_STALLED_ITERATIONS) {
                 Log.w(TAG, "decodeAndResample: no progress for " + MAX_STALLED_ITERATIONS
                         + " iterations, aborting instead of hanging forever");
+                DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, "aborted: decoder stalled for "
+                        + MAX_STALLED_ITERATIONS + " iterations (~20s)");
                 return null;
             } else {
                 // FfmpegAudioDecoder's dequeue calls never block (unlike MediaCodec's timeout-based

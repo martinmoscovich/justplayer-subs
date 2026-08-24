@@ -11,6 +11,7 @@ import androidx.preference.PreferenceFragmentCompat;
 import androidx.preference.SwitchPreferenceCompat;
 
 import com.brouken.player.R;
+import com.brouken.player.subs.debug.DebugLog;
 
 import java.util.HashMap;
 import java.util.List;
@@ -33,6 +34,44 @@ public class SubtitleSettingsFragment extends PreferenceFragmentCompat {
         wireLanguageEditor(SubtitleSettings.KEY_SOURCE_LANGS);
         wireLanguageEditor(SubtitleSettings.KEY_TARGET_LANGS);
         wireQrSetup();
+        wireDebug();
+    }
+
+    /**
+     * The debug switch and the action that clears what it wrote. The switch applies immediately
+     * rather than on the next playback: turning it <em>off</em> must delete the stored logs right
+     * there ({@link DebugLog#setEnabled}), and the player may not even be alive to notice the pref
+     * change from here.
+     */
+    private void wireDebug() {
+        Preference toggle = findPreference(SubtitleSettings.KEY_DEBUG_MODE);
+        if (toggle != null) {
+            toggle.setOnPreferenceChangeListener((pref, value) -> {
+                boolean on = Boolean.TRUE.equals(value);
+                DebugLog.setEnabled(requireContext(), on);
+                // From the new value, not from storage: this runs before the value is persisted.
+                applyDebugRow(on);
+                return true;
+            });
+        }
+        Preference clear = findPreference(SubtitleSettings.KEY_DEBUG_CLEAR_LOGS);
+        if (clear != null) {
+            clear.setOnPreferenceClickListener(pref -> {
+                DebugLog.clearAll(requireContext());
+                applyDebugRow(true); // only reachable while debug is on
+                return true;
+            });
+        }
+    }
+
+    /** Keeps "Clear debug logs" honest: disabled while debug is off, and its summary shows what is stored. */
+    private void applyDebugRow(boolean debugOn) {
+        Context context = getContext();
+        if (context == null) return;
+        Preference clear = findPreference(SubtitleSettings.KEY_DEBUG_CLEAR_LOGS);
+        if (clear == null) return;
+        clear.setEnabled(debugOn);
+        clear.setSummary(debugOn ? DebugLog.describeStorage(context) : "Enable debug mode to record logs");
     }
 
     private void wireQrSetup() {
@@ -105,6 +144,12 @@ public class SubtitleSettingsFragment extends PreferenceFragmentCompat {
         if (autoSelect instanceof SwitchPreferenceCompat) {
             ((SwitchPreferenceCompat) autoSelect).setChecked(SubtitleSettings.autoSelectEnabled(context));
         }
+        boolean debugOn = SubtitleSettings.debugEnabled(context);
+        Preference debug = findPreference(SubtitleSettings.KEY_DEBUG_MODE);
+        if (debug instanceof SwitchPreferenceCompat) {
+            ((SwitchPreferenceCompat) debug).setChecked(debugOn);
+        }
+        applyDebugRow(debugOn);
     }
 
     private void setTextIfPresent(String key, String value) {
