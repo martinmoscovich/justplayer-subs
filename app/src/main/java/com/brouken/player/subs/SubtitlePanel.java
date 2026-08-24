@@ -304,8 +304,10 @@ public class SubtitlePanel extends FrameLayout
         if (!isOpen()) return;
         syncView.onTick(positionMs);
         // Translate shows the same playback clock, so it needs the tick too — without this the
-        // counter there would freeze at whatever the last value was before the screen opened.
-        translateView.onTick(positionMs);
+        // counter there would freeze at whatever the last value was before the screen opened. The
+        // play state comes with it: this screen pauses playback itself while a run is in flight, so a
+        // frozen number without a glyph reads as a stall rather than as a deliberate pause.
+        translateView.onTick(positionMs, isPlaying());
     }
 
     public boolean handleKey(KeyEvent event) {

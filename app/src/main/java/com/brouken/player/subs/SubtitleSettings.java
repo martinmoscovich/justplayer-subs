@@ -34,6 +34,7 @@ public final class SubtitleSettings {
     public static final String KEY_SEEK_S = "pref_seek_s";
     public static final String KEY_SEGMENT_GAP_S = "pref_segment_gap_s";
     public static final String KEY_SEGMENT_RESTART_S = "pref_segment_restart_s";
+    public static final String KEY_AUTOSYNC_PROBES = "pref_autosync_probes";
     // Translation (reserved — wired when Feature C lands)
     public static final String KEY_AI_PROVIDER = "pref_ai_provider";
     public static final String KEY_AI_MODEL = "pref_ai_model";
@@ -116,6 +117,21 @@ public final class SubtitleSettings {
             prefs(c).edit().remove(KEY_DEBUG_MODE).apply();
             return false;
         }
+    }
+
+    /**
+     * How many independent windows auto-sync samples per run. More probes means more chances that one
+     * of them lands on dialogue dense enough to correlate — at the cost of that many concurrent
+     * downloads competing for the same link, which is why it is worth being able to try 1 and 4 on a
+     * real stream rather than guessing.
+     */
+    public static final int AUTOSYNC_PROBES_DEFAULT = 2;
+    public static final int AUTOSYNC_PROBES_MAX = 4;
+
+    /** Clamped to 1..{@link #AUTOSYNC_PROBES_MAX}: a stored 0 (or a typo) must not disable auto-sync. */
+    public static int autoSyncProbes(Context c) {
+        long stored = getLong(c, KEY_AUTOSYNC_PROBES, AUTOSYNC_PROBES_DEFAULT);
+        return (int) Math.max(1, Math.min(AUTOSYNC_PROBES_MAX, stored));
     }
 
     /** Ordered preferred languages the user wants to see (target order, then source as fallback). */

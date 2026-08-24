@@ -206,8 +206,9 @@ public class TranslateView extends FrameLayout {
     }
 
     /** Driven by the panel's playback tick, same as {@link com.brouken.player.subs.SyncView}. */
-    public void onTick(long positionMs) {
+    public void onTick(long positionMs, boolean playing) {
         clock.setPositionMs(positionMs);
+        clock.setPlaying(playing);
     }
 
     public void setListener(Listener l) {

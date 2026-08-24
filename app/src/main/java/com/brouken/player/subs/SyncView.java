@@ -269,7 +269,7 @@ public class SyncView extends FrameLayout {
     /** Pushes formatted auto-sync state (see {@link AutoSyncController}). A confident result opens Zone.REVIEW. */
     public void setAutoSyncState(AutoSyncUiState state) {
         this.autoSyncState = state;
-        if (state.hasConfidentResult && zone != Zone.REVIEW) {
+        if (state.showResultModal && zone != Zone.REVIEW) {
             zone = Zone.REVIEW;
             adapter.setSelectedIndex(-1);
             showReviewModal();
@@ -317,6 +317,7 @@ public class SyncView extends FrameLayout {
             }
         }
         boolean playing = listener != null && listener.isPlaying();
+        clock.setPlaying(playing);
         if (playing != lastPlaying) {
             lastPlaying = playing;
             buttonViews[PLAY_PAUSE_INDEX].setIcon(
@@ -538,11 +539,20 @@ public class SyncView extends FrameLayout {
 
     /** The auto-sync proposal. It <em>proposes</em>: nothing is applied until Accept. */
     private void showReviewModal() {
-        double offset = autoSyncState != null ? autoSyncState.offsetSeconds : 0;
-        showModal("Auto-sync found a match",
-                String.format(Locale.US, "Shift subtitles %+.2fs", offset),
-                new SubsButton(getContext(), "Accept"),
-                new SubsButton(getContext(), "Reject"));
+        if (autoSyncState == null) return;
+        if (autoSyncState.hasConfidentResult) {
+            showModal("Auto-sync found a match",
+                    String.format(Locale.US, "Shift subtitles %+.2fs", autoSyncState.offsetSeconds),
+                    new SubsButton(getContext(), "Accept"),
+                    new SubsButton(getContext(), "Reject"));
+            return;
+        }
+        // Nothing to propose, but the run still ended: the user waited through it and gets told here,
+        // in the same place a proposal would have appeared, rather than in a hint they may not look at.
+        showModal(autoSyncState.hint != null && !autoSyncState.hint.isEmpty()
+                        ? autoSyncState.hint : "No confident match",
+                "The subtitles were left as they are",
+                new SubsButton(getContext(), "OK"));
     }
 
     private void showAutoSyncMenu() {
@@ -584,7 +594,9 @@ public class SyncView extends FrameLayout {
             case KeyEvent.KEYCODE_ENTER:
             case KeyEvent.KEYCODE_NUMPAD_ENTER:
                 if (review) {
-                    if (modalIndex == 0) acceptAutoSync(); else rejectAutoSync();
+                    // A no-match modal has one button and nothing to accept — any press dismisses it.
+                    boolean hasProposal = autoSyncState != null && autoSyncState.hasConfidentResult;
+                    if (hasProposal && modalIndex == 0) acceptAutoSync(); else rejectAutoSync();
                 } else {
                     boolean fromHere = modalIndex == 1;
                     exitModal();
@@ -656,12 +668,16 @@ public class SyncView extends FrameLayout {
     private void updateStage() {
         RowShape shape;
         if (running()) {
-            String title = busyTitle != null ? busyTitle
-                    : (autoSyncState != null && autoSyncState.runTitle != null ? autoSyncState.runTitle : "Working");
-            float fraction = busyTitle != null ? busyFraction
-                    : (autoSyncState != null ? autoSyncState.runFraction : -1f);
-            String pct = fraction >= 0f ? Math.round(fraction * 100) + "%" : null;
-            centeredBlock.show(R.drawable.subtitle_ic_spinner, true, title, pct, fraction);
+            if (busyTitle != null) {
+                // Reading the embedded track: one job, one thing to say.
+                String pct = busyFraction >= 0f ? Math.round(busyFraction * 100) + "%" : null;
+                centeredBlock.show(R.drawable.subtitle_ic_spinner, true, busyTitle, pct, busyFraction);
+            } else {
+                // Auto-sync: several windows at once, each with its own column — see
+                // AutoSyncUiState.probes for why one shared title and bar could not say this.
+                centeredBlock.showProbes(R.drawable.subtitle_ic_spinner, "Listening to the video",
+                        probeColumns());
+            }
             list.setVisibility(GONE);
             shape = RowShape.RUNNING;
         } else if (deadEnd()) {
@@ -685,6 +701,21 @@ public class SyncView extends FrameLayout {
             updateHint();
         }
         updateButtons();
+    }
+
+    /** Maps the formatted state into what the block draws. Never empty while auto-sync runs, but a
+     *  run reports its first event a beat after starting, so this covers the gap with one column. */
+    private java.util.List<SubsCenteredBlock.Probe> probeColumns() {
+        java.util.List<SubsCenteredBlock.Probe> columns = new java.util.ArrayList<>();
+        if (autoSyncState != null) {
+            for (AutoSyncUiState.ProbeRow row : autoSyncState.probes) {
+                columns.add(new SubsCenteredBlock.Probe(row.label, row.title, row.fraction, row.active));
+            }
+        }
+        if (columns.isEmpty()) {
+            columns.add(new SubsCenteredBlock.Probe("", "Starting", -1f, true));
+        }
+        return columns;
     }
 
     private void buildRow(RowShape shape) {

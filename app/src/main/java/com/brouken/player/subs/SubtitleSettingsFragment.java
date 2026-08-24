@@ -133,6 +133,10 @@ public class SubtitleSettingsFragment extends PreferenceFragmentCompat {
                 String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_SEGMENT_GAP_S, d.getSegmentGapMs() / 1000)));
         setTextIfPresent(SubtitleSettings.KEY_SEGMENT_RESTART_S,
                 String.valueOf(SubtitleSettings.getLong(context, SubtitleSettings.KEY_SEGMENT_RESTART_S, d.getSegmentRestartMs() / 1000)));
+        // Shows the clamped value, not the raw stored one: what the field displays has to be what
+        // auto-sync will actually use, or a leftover "9" would read as an accepted setting.
+        setTextIfPresent(SubtitleSettings.KEY_AUTOSYNC_PROBES,
+                String.valueOf(SubtitleSettings.autoSyncProbes(context)));
 
         Preference provider = findPreference(SubtitleSettings.KEY_AI_PROVIDER);
         if (provider instanceof ListPreference) {

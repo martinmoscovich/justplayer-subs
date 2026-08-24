@@ -2,6 +2,8 @@ package com.brouken.player.subs;
 
 import androidx.annotation.Nullable;
 
+import java.util.List;
+
 /**
  * Formatted snapshot of an auto-sync run pushed to {@link SyncView} via
  * {@link SubtitlePanel#setAutoSyncState}. Every field is precomputed by {@link AutoSyncController};
@@ -14,53 +16,96 @@ public final class AutoSyncUiState {
     @Nullable public final String unavailableReason;
     public final boolean running;
     public final String hint;
-    /** RUNNING only: the phase as a headline ("Extracting audio"), with no percentage glued on —
-     *  the screen shows the number as its own line and as a bar, so it needs them apart. */
-    @Nullable public final String runTitle;
-    /** RUNNING only: 0..1, negative when the phase can't say. */
-    public final float runFraction;
+    /**
+     * RUNNING only: one row per sampled window, in the order they are tried. A run works on several
+     * windows at once — all of them download together, and the first one's analysis overlaps the rest
+     * — so a single title and bar cannot describe it: collapsing them made the number jump backwards
+     * and read as sequential work. Empty when nothing is running.
+     */
+    public final List<ProbeRow> probes;
     public final boolean hasConfidentResult;
+
+    /** One sampled window's own progress, already formatted for the screen. */
+    public static final class ProbeRow {
+        /** "12:14" — where in the video this window listens. Deliberately not an ordinal: the engine
+         *  tries the windows by dialogue density, not in time order, so a number here would read as a
+         *  sequence and contradict the timestamps next to it. */
+        public final String label;
+        /** "Extracting audio" / "Analyzing speech" / "Matching subtitles", or why it isn't working. */
+        public final String title;
+        /** 0..1, negative when there is no number to show (queued, skipped). */
+        public final float fraction;
+        /** Dimmed when this window is no longer working — finished, or never needed. */
+        public final boolean active;
+
+        ProbeRow(String label, String title, float fraction, boolean active) {
+            this.label = label;
+            this.title = title;
+            this.fraction = fraction;
+            this.active = active;
+        }
+    }
     public final double offsetSeconds;
     public final double uniqueness;
+    /**
+     * Whether the run ended in a way that owes the user a modal. True for a proposal <em>and</em> for
+     * "nothing found" / "it failed": the user waited through the whole run either way, and an outcome
+     * that shows up only as a small hint at the edge of a screen is an outcome they can miss. False
+     * for a cancellation — they already know, they did it.
+     */
+    public final boolean showResultModal;
 
     private AutoSyncUiState(boolean available, @Nullable String unavailableReason, boolean running,
-                             String hint, boolean hasConfidentResult, double offsetSeconds, double uniqueness) {
-        this(available, unavailableReason, running, hint, null, -1f, hasConfidentResult, offsetSeconds, uniqueness);
+                             String hint, boolean hasConfidentResult, double offsetSeconds, double uniqueness,
+                             boolean showResultModal) {
+        this(available, unavailableReason, running, hint, List.of(), hasConfidentResult, offsetSeconds,
+                uniqueness, showResultModal);
     }
 
     private AutoSyncUiState(boolean available, @Nullable String unavailableReason, boolean running,
-                             String hint, @Nullable String runTitle, float runFraction,
-                             boolean hasConfidentResult, double offsetSeconds, double uniqueness) {
+                             String hint, List<ProbeRow> probes,
+                             boolean hasConfidentResult, double offsetSeconds, double uniqueness,
+                             boolean showResultModal) {
         this.available = available;
         this.unavailableReason = unavailableReason;
         this.running = running;
         this.hint = hint;
-        this.runTitle = runTitle;
-        this.runFraction = runFraction;
+        this.probes = probes;
         this.hasConfidentResult = hasConfidentResult;
         this.offsetSeconds = offsetSeconds;
         this.uniqueness = uniqueness;
+        this.showResultModal = showResultModal;
     }
 
     static AutoSyncUiState unavailable(String reason) {
-        return new AutoSyncUiState(false, reason, false, reason, false, 0, 0);
+        return new AutoSyncUiState(false, reason, false, reason, false, 0, 0, false);
     }
 
     static AutoSyncUiState idle() {
-        return new AutoSyncUiState(true, null, false, "", false, 0, 0);
+        return new AutoSyncUiState(true, null, false, "", false, 0, 0, false);
     }
 
-    static AutoSyncUiState running(String hint, String title, float fraction) {
-        return new AutoSyncUiState(true, null, true, hint, title, fraction, false, 0, 0);
+    static AutoSyncUiState running(String hint, List<ProbeRow> probes) {
+        return new AutoSyncUiState(true, null, true, hint, probes, false, 0, 0, false);
+    }
+
+    static ProbeRow probeRow(String label, String title, float fraction, boolean active) {
+        return new ProbeRow(label, title, fraction, active);
     }
 
     /** DONE with a confident result — {@link SyncView} shows Zone.REVIEW for this state. */
     static AutoSyncUiState confidentResult(double offsetSeconds, double uniqueness, String hint) {
-        return new AutoSyncUiState(true, null, false, hint, true, offsetSeconds, uniqueness);
+        return new AutoSyncUiState(true, null, false, hint, true, offsetSeconds, uniqueness, true);
     }
 
-    /** DONE with no confident match, CANCELLED, or ERROR — same shape as {@link #idle}, different hint. */
+    /** A run that ended with nothing to propose (no match, or an error) — same shape as {@link #idle}
+     *  with a hint, plus the modal that says so. See {@link #showResultModal}. */
+    static AutoSyncUiState finishedEmpty(String hint) {
+        return new AutoSyncUiState(true, null, false, hint, false, 0, 0, true);
+    }
+
+    /** Cancelled: a hint, no modal — the user did it and does not need telling. */
     static AutoSyncUiState terminal(String hint) {
-        return new AutoSyncUiState(true, null, false, hint, false, 0, 0);
+        return new AutoSyncUiState(true, null, false, hint, false, 0, 0, false);
     }
 }

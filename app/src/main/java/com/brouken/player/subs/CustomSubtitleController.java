@@ -142,7 +142,9 @@ public class CustomSubtitleController
         ilp.rightMargin = indicatorMargin;
         root.addView(translation.getIndicatorView(), ilp);
 
-        autoSync = new AutoSyncController(context, panel, handler, headers);
+        autoSync = new AutoSyncController(context, panel, handler, headers,
+                () -> SelectedAudioTrack.from(player));
+        autoSync.setRunListener(this::onAutoSyncRunActive);
         FrameLayout.LayoutParams alp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         alp.gravity = Gravity.TOP | Gravity.START;
@@ -188,6 +190,8 @@ public class CustomSubtitleController
         notice.hide(); // a notice about the previous media must not survive into this one
         playbackLogger.reset();
         durationLogged = false;
+        // A pause owed to a run on the previous media must not resume this one.
+        wasPlayingBeforeAutoSyncPause = null;
         // Idempotent per media URI on purpose: onMediaSet fires twice per playback (see TESTING.md),
         // and that must not produce two log files for one playback.
         DebugLog.startSession(context, mediaUri, selection.mediaTitle());
@@ -361,6 +365,34 @@ public class CustomSubtitleController
             return;
         }
         startAutoSync(fromHere);
+    }
+
+    /** Set only when the auto-sync run itself paused playback — {@code null} otherwise, so
+     *  {@link #onAutoSyncRunActive} never resumes playback the user paused some other way. Same rule
+     *  and same reasoning as {@link #wasPlayingBeforeTranslatePause}. */
+    @Nullable private Boolean wasPlayingBeforeAutoSyncPause;
+
+    /**
+     * Frees the machine for the run and gives it back afterwards. A run competes with playback for
+     * both ends at once: every sampled window downloads concurrently over the same link (measured at
+     * 72s and 80s on a debrid stream, alongside the video's own buffering), and the VAD is ~9k ONNX
+     * inferences. Pausing turns that contention into throughput for the thing the user is waiting on.
+     */
+    private void onAutoSyncRunActive(boolean active) {
+        if (player == null) return;
+        if (active) {
+            if (wasPlayingBeforeAutoSyncPause != null) return; // already paused for this run
+            wasPlayingBeforeAutoSyncPause = player.isPlaying();
+            if (player.isPlaying()) player.pause();
+            DebugLog.log(DebugLog.CAT_PLAYBACK, "paused for the auto-sync run");
+        } else {
+            Boolean wasPlaying = wasPlayingBeforeAutoSyncPause;
+            wasPlayingBeforeAutoSyncPause = null;
+            if (wasPlaying != null && wasPlaying) {
+                player.play();
+                DebugLog.log(DebugLog.CAT_PLAYBACK, "resumed after the auto-sync run");
+            }
+        }
     }
 
     private void startAutoSync(boolean fromHere) {
@@ -663,12 +695,28 @@ public class CustomSubtitleController
     @Override public void onAutoSelected(SubtitleOption option, boolean preferredLanguage) {
         if (panel.isOpen()) return; // the selector already shows what is playing
         String language = LanguageFlags.displayNameFor(option.language);
+        String how = matchQualifier(option);
         if (preferredLanguage) {
-            notice.show(language != null ? language + " subtitle found!" : "Subtitle found!", false);
+            notice.show((language != null ? language + " subtitle found!" : "Subtitle found!") + how, false);
         } else {
-            notice.show(language != null ? language + " subtitle selected" : "Subtitle selected",
+            notice.show((language != null ? language + " subtitle selected" : "Subtitle selected") + how,
                     translation.isAvailable());
         }
+    }
+
+    /**
+     * How the automatically-picked subtitle was found, when that is worth saying. The selector row
+     * already carries a "Hash"/"IMDB" chip, but the notice is what the user actually sees when they
+     * are <em>not</em> in the panel — which is the whole point of the notice — so without this the
+     * one moment a pick is announced is also the one moment its provenance is hidden.
+     *
+     * <p>Only for exact matches, mirroring the row's rule: a title match is the weak one and is left
+     * unqualified rather than dressed up (see {@code MatchStrategy}).
+     */
+    private static String matchQualifier(SubtitleOption option) {
+        if (option.matchStrategy == subtitleengine.provider.MatchStrategy.HASH) return " · exact match";
+        if (option.matchStrategy == subtitleengine.provider.MatchStrategy.MEDIA_ID) return " · matched by IMDB";
+        return "";
     }
 
     private void openTranslatePanel() {

@@ -62,6 +62,11 @@
             app:title="Prev-segment restart threshold (s)"
             app:summary="'Prev seg' restarts the current segment if you are at least this far into it"
             />
+        <EditTextPreference
+            app:key="pref_autosync_probes"
+            app:title="Auto-sync samples (1-4)"
+            app:summary="How many parts of the video auto-sync listens to. More samples find dialogue more often, but download at the same time over one connection."
+            />
     </PreferenceCategory>
 
     <PreferenceCategory app:title="Translation">

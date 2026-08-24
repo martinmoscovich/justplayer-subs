@@ -87,6 +87,13 @@ public class Media3AudioProvider implements AudioProvider {
 
     private final Context context;
     @Nullable private final Map<String, String> headers;
+    /**
+     * Which track to capture — see {@link SelectedAudioTrack}. A supplier, not a value: this provider
+     * outlives a single run (the resyncer that owns it is kept alive because closing the ONNX
+     * environment would break the next run), and the user can switch audio track between runs — which
+     * is exactly the case this whole mechanism exists for. Resolved per extraction.
+     */
+    private final java.util.function.Supplier<SelectedAudioTrack> selectedTrack;
 
     /** See {@link AudioProvider#extractAudioSegment} — thrown instead of returning null when we can
      *  name the reason. Unchecked: {@link AudioProvider}'s signature declares no checked exceptions. */
@@ -97,8 +104,20 @@ public class Media3AudioProvider implements AudioProvider {
     }
 
     public Media3AudioProvider(Context context, @Nullable Map<String, String> headers) {
+        this(context, headers, () -> SelectedAudioTrack.UNKNOWN);
+    }
+
+    /**
+     * @param selectedTrack supplies the track playback is on at the moment an extraction starts, so
+     *                      the correlation runs against the audio the user is actually hearing — see
+     *                      {@link SelectedAudioTrack} for what goes wrong without it, and the field's
+     *                      javadoc for why it is a supplier.
+     */
+    public Media3AudioProvider(Context context, @Nullable Map<String, String> headers,
+                               java.util.function.Supplier<SelectedAudioTrack> selectedTrack) {
         this.context = context.getApplicationContext();
         this.headers = headers;
+        this.selectedTrack = selectedTrack;
     }
 
     @Override
@@ -123,7 +142,7 @@ public class Media3AudioProvider implements AudioProvider {
                         "Unrecognised media container for auto-sync — no extractor could read this file");
             }
 
-            AudioSink sink = new AudioSink();
+            AudioSink sink = new AudioSink(selectedTrack.get());
             extractor.init(sink);
             PositionHolder seekPosition = new PositionHolder();
 
@@ -154,12 +173,10 @@ public class Media3AudioProvider implements AudioProvider {
             Format format = audio.format;
             Log.i(TAG, "extractAudioSegment: audio track " + format.sampleMimeType + " "
                     + format.channelCount + "ch @" + format.sampleRate + "Hz in " + describe(source));
-            // The *first* audio track in the container, not the one being listened to (see
-            // AudioSink.endTracks). On a multi-audio file that difference is the first thing to check
-            // when auto-sync lands on a confident but wrong offset — compare against the [AUDIO] line.
-            DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, () -> "track (first in container) "
-                    + format.sampleMimeType + " " + format.channelCount + "ch @" + format.sampleRate
-                    + "Hz id=" + format.id + " lang=" + format.language);
+            // Which track was picked, and why, is reported by AudioSink.endTracks — this adds the
+            // format details that matter for the decode itself.
+            DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, () -> "track " + format.sampleMimeType + " "
+                    + format.channelCount + "ch @" + format.sampleRate + "Hz");
 
             if (MimeTypes.AUDIO_RAW.equals(format.sampleMimeType)) {
                 // Nothing to decode — but PcmDownmixResampler consumes interleaved 16-bit LE only, so
@@ -515,13 +532,21 @@ public class Media3AudioProvider implements AudioProvider {
         }
     }
 
-    /** Collects the extractor's tracks and picks the first audio one to capture. */
+    /**
+     * Collects the extractor's tracks and picks the audio one to capture: the track playback is on
+     * when it can be identified, else the first audio track in the container.
+     */
     private static final class AudioSink implements ExtractorOutput {
         @Nullable AudioTrack audioTrack;
         @Nullable SeekMap seekMap;
         boolean tracksEnded;
 
+        private final SelectedAudioTrack selectedTrack;
         private final List<AudioTrack> tracks = new ArrayList<>();
+
+        AudioSink(SelectedAudioTrack selectedTrack) {
+            this.selectedTrack = selectedTrack;
+        }
 
         @Override
         public TrackOutput track(int id, @C.TrackType int type) {
@@ -532,18 +557,48 @@ public class Media3AudioProvider implements AudioProvider {
 
         @Override
         public void endTracks() {
+            List<AudioTrack> audioTracks = new ArrayList<>();
             for (AudioTrack track : tracks) {
                 Format format = track.format;
                 if (format != null && format.sampleMimeType != null
                         && format.sampleMimeType.startsWith("audio/")) {
-                    // First audio track wins. Which track the user is actually *listening to* would be
-                    // the better choice for a multi-audio file (a dub's dialogue does not land on the
-                    // same milliseconds as the original), but that needs the player's selected track
-                    // plumbed in — tracked in PENDING.md.
-                    audioTrack = track;
-                    track.capturing = true;
-                    break;
+                    audioTracks.add(track);
                 }
+            }
+
+            // The track being listened to, when we know which that is. A dub's dialogue does not land
+            // on the same milliseconds as the original, so correlating against the wrong one yields an
+            // offset that is wrong but looks exactly as confident as a right one — see SelectedAudioTrack.
+            AudioTrack chosen = null;
+            String how = null;
+            if (selectedTrack.isKnown()) {
+                for (AudioTrack track : audioTracks) {
+                    if (selectedTrack.matches(track.format.id, track.format.language)) {
+                        chosen = track;
+                        how = "matches the playing track";
+                        break;
+                    }
+                }
+            }
+            if (chosen == null && !audioTracks.isEmpty()) {
+                chosen = audioTracks.get(0);
+                // Worth saying out loud rather than falling back quietly: on a multi-audio file this
+                // is the case where the result can be confidently wrong.
+                how = selectedTrack.isKnown()
+                        ? "FALLBACK: first in container — could not match the playing track (id="
+                                + selectedTrack.id + " lang=" + selectedTrack.language + ")"
+                        : "first in container — playing track unknown";
+            }
+            if (chosen != null) {
+                audioTrack = chosen;
+                chosen.capturing = true;
+                String reason = how;
+                Format format = chosen.format;
+                Log.i(TAG, "endTracks: capturing audio id=" + format.id + " lang=" + format.language
+                        + " (" + reason + ", of " + audioTracks.size() + " audio tracks)");
+                DebugLog.log(DebugLog.CAT_EXTRACT_AUDIO, () -> "chose audio id=" + format.id
+                        + " lang=" + format.language + " codec=" + format.sampleMimeType
+                        + " — " + reason + " (of " + audioTracks.size() + " audio tracks)");
             }
             tracksEnded = true;
         }

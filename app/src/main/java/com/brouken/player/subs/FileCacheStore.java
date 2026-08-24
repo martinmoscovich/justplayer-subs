@@ -38,18 +38,37 @@ public class FileCacheStore implements CacheStore {
      * mode exists — the engine's own {@code SubtitleCache} only logs failures. Reconstructing a session
      * needs the hits as much as the misses: a run that looks free was a hit, and a run that repeats
      * work someone already paid for is a miss that should not have been one.
+     *
+     * <p>Reads are deduplicated (see {@link #lastReadResult}). Unlike writes, they are driven by the
+     * app polling rather than by anything happening: {@code markCacheStatus()} probes the cache once
+     * per subtitle option every time the option list is rebuilt, which is often. Undeduplicated, this
+     * category was 1378 of ~2400 lines in the first real session — the same miss up to 35 times —
+     * burying the categories that carried actual events.
      */
     @Override
     public byte[] read(String key) throws IOException {
         File f = fileFor(key);
         if (!f.isFile()) {
-            DebugLog.log(DebugLog.CAT_CACHE, "miss " + key);
+            logRead(key, "miss " + key);
             return null;
         }
         byte[] data = Files.readAllBytes(f.toPath());
-        DebugLog.log(DebugLog.CAT_CACHE, () -> "hit " + key + " (" + data.length + " bytes, stored "
+        logRead(key, "hit " + key + " (" + data.length + " bytes, stored "
                 + EmbeddedSubtitleController.ageDescription(f.lastModified()) + ")");
         return data;
+    }
+
+    /**
+     * What each key's last read reported, so a repeated probe writes nothing and a key that actually
+     * changed state (a miss that becomes a hit once something is stored) still does.
+     */
+    private final java.util.Map<String, String> lastReadResult =
+            java.util.Collections.synchronizedMap(new java.util.HashMap<>());
+
+    private void logRead(String key, String message) {
+        if (!DebugLog.enabled()) return;
+        if (message.equals(lastReadResult.put(key, message))) return;
+        DebugLog.log(DebugLog.CAT_CACHE, message);
     }
 
     @Override
@@ -72,12 +91,16 @@ public class FileCacheStore implements CacheStore {
             // and no sweep would ever reclaim them.
             Files.deleteIfExists(tmp.toPath());
         }
+        // Writes are not deduplicated: each one is a real event (something was produced and stored),
+        // and two writes of the same size to the same key are two different states worth seeing.
+        lastReadResult.remove(key); // the next read is a genuinely new answer
         DebugLog.log(DebugLog.CAT_CACHE, () -> "write " + key + " (" + data.length + " bytes)");
     }
 
     @Override
     public void remove(String key) throws IOException {
         boolean existed = Files.deleteIfExists(fileFor(key).toPath());
+        lastReadResult.remove(key);
         DebugLog.log(DebugLog.CAT_CACHE, "remove " + key + (existed ? "" : " (was not stored)"));
     }
 
