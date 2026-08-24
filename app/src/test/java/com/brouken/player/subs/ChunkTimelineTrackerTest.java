@@ -448,6 +448,28 @@ class ChunkTimelineTrackerTest {
     }
 
     @Test
+    void streaming_readyEstimatedSegmentIsClosing_evenIfTheExtractionEstimateDisagrees() {
+        // Sharper version of the test above: here the extraction estimate (extractedContentMs, and
+        // therefore currentExtractionFraction() too) claims we are barely past this segment's start —
+        // nowhere near its end — while isRangeReady says the whole range is already translated. That
+        // combination should be impossible in a healthy run (translating an entry requires it to have
+        // been extracted first), but CLOSING must not depend on the two agreeing: it is a direct
+        // consequence of "ready but not a real boundary yet", not a side effect of extracted >= end
+        // happening to also be true. If this ever regressed to falling through to the fill/PENDING
+        // logic below, a disagreement like this one would show partial progress (or blank) for content
+        // that is actually fully done.
+        ChunkingConfig config = config(1_000L, 1_000L);
+        ChunkTimelineTracker tracker = new ChunkTimelineTracker(config);
+        SubtitlePipelineSession session = alwaysReadySession(config);
+
+        tracker.reset(1_000L, 0L, null); // one estimated segment, [0, 1000)
+        ChunkProgressBarView.Model model = tracker.buildModel(streaming(List.of(), 200L), session, 0L);
+
+        assertEquals(1, model.segments.size());
+        assertEquals(ChunkProgressBarView.SegmentState.CLOSING, model.segments.get(0).state);
+    }
+
+    @Test
     void streaming_realChunkClosedAndNoLongerActive_isClosed_notPendingOrClosingForever() {
         ChunkingConfig config = config(1_000L, 1_000L);
         ChunkTimelineTracker tracker = new ChunkTimelineTracker(config);

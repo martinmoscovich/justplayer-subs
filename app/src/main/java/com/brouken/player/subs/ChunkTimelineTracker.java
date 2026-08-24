@@ -335,6 +335,17 @@ final class ChunkTimelineTracker {
             return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.DONE,
                     endEstimated, backgroundPass, 0f, null);
         }
+        // Ready but the boundary is still a guess: definitely CLOSING, not "fall through and hope the
+        // extraction estimate below also says extracted >= end". isRangeReady being true already proves
+        // extraction got past here — translating an entry requires it to have been extracted first, and
+        // extractedContentMs is kept at the max entry end seen — but that estimate has its own sources
+        // of slack (the live byte-fraction blend, zone attribution). Stating this directly, instead of
+        // depending on that arithmetic agreeing, is what actually keeps this state from ever reading as
+        // "still extracting" (a partial fill, or worse, PENDING) for content that is already done.
+        if (endEstimated && session.isRangeReady(start, end)) {
+            return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.CLOSING,
+                    endEstimated, backgroundPass, 0f, null);
+        }
         for (ChunkProgress cp : active.values()) {
             if (overlaps(start, end, cp.getStartMs(), cp.getEndMs())) {
                 return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.TRANSLATING,
