@@ -91,6 +91,29 @@ class ChunkTimelineTrackerTest {
         return new SubtitlePipelineSession(translator, config, 1, sameThread, noopListener);
     }
 
+    /** Same as {@link #neverStartedSession}, but {@link SubtitlePipelineSession#currentExtractionFraction()}
+     *  returns a fixed value instead of the real (always-0, since nothing is running) one — stands in for
+     *  a live streaming run whose container read has moved on without a cue to report it through
+     *  {@code onEntryExtracted}. */
+    private static SubtitlePipelineSession sessionWithLiveExtractionFraction(ChunkingConfig config, double fraction) {
+        TranslationClient client = new TranslationClient() {
+            @Override public String getName() { return "fake"; }
+            @Override public String getModelId() { return "fake"; }
+            @Override public CompletionResult complete(String systemPrompt, String userPrompt) {
+                throw new AssertionError("should never be called — session is never started");
+            }
+        };
+        SubtitleTranslator translator = new SubtitleTranslator(client, new SubtitleChunker(), 1, 0);
+        Executor sameThread = Runnable::run;
+        SubtitlePipelineSession.Listener noopListener = new SubtitlePipelineSession.Listener() {
+            @Override public void onSubtitleUpdated(SubtitleFile current) { }
+            @Override public void onProgress(TranslationProgress progress) { }
+        };
+        return new SubtitlePipelineSession(translator, config, 1, sameThread, noopListener) {
+            @Override public double currentExtractionFraction() { return fraction; }
+        };
+    }
+
     private static SubtitleEntry entry(int index, long startMs, long endMs) {
         return new SubtitleEntry(index, startMs, endMs, List.of("line " + index));
     }
@@ -354,6 +377,29 @@ class ChunkTimelineTrackerTest {
         assertEquals(ChunkProgressBarView.SegmentState.EXTRACTING, seg.state);
         assertEquals(0.4f, seg.extractingFill, 0.001f);
         assertEquals("40%", seg.label, "no speed factor yet must still show a plain percentage, not null");
+    }
+
+    @Test
+    void streaming_extractingThroughADialogueGap_fillFollowsLiveByteProgress_notJustTheLastCue() {
+        // Regression: getExtractedContentMs() only advances when a cue lands, so a stretch with no
+        // dialogue (silence, credits) reported nothing at all and the fill sat frozen at whatever the
+        // last cue said — indistinguishable from a stalled run. The live container-byte fraction
+        // (session.currentExtractionFraction()) keeps moving through that gap; buildSegment must take
+        // the max of the two, not just the cue-based number.
+        ChunkingConfig config = config(1_000L, 1_000L);
+        ChunkTimelineTracker tracker = new ChunkTimelineTracker(config);
+        // 70% by bytes far outrunning the last cue at 100ms (out of a 1_000ms segment) — the gap this
+        // regression is about.
+        SubtitlePipelineSession session = sessionWithLiveExtractionFraction(config, 0.7);
+
+        tracker.reset(1_000L, 0L, null); // one estimated segment, [0, 1000)
+        ChunkProgressBarView.Model model = tracker.buildModel(streamingBeforeAnyChunkStarted(100L), session, 0L);
+
+        assertEquals(1, model.segments.size());
+        ChunkProgressBarView.Segment seg = model.segments.get(0);
+        assertEquals(ChunkProgressBarView.SegmentState.EXTRACTING, seg.state);
+        assertEquals(0.7f, seg.extractingFill, 0.001f, "fill must follow the live byte fraction, not the stale cue");
+        assertEquals("70%", seg.label);
     }
 
     @Test

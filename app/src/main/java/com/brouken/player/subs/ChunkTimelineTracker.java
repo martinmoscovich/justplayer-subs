@@ -344,7 +344,15 @@ final class ChunkTimelineTracker {
                     endEstimated, backgroundPass, 0f, null);
         }
         if (progress.isStreaming()) {
-            long extracted = progress.getExtractedContentMs();
+            // progress.getExtractedContentMs() only moves when a cue arrives (see onEntryExtracted in
+            // the engine) — a stretch with no dialogue reports nothing at all, and the bar reads as
+            // stalled even though bytes keep coming in. session.currentExtractionFraction() is a live
+            // read of the container's byte position instead, cue or no cue; scaled by totalDurationMs it
+            // is the same "roughly uniform bitrate" assumption the chunk-duration estimates already
+            // make. Only ever raises the estimate — a stale cue-based number from before the container
+            // caught up must never make progress look like it went backwards.
+            long extracted = Math.max(progress.getExtractedContentMs(),
+                    (long) (session.currentExtractionFraction() * totalDurationMs));
             // A single scalar can't unambiguously locate the frontier across two disjoint zones — once
             // a position-priority run's priority pass has read anything, `extracted` sits somewhere at
             // or past startAtMs, which numerically satisfies "start <= extracted" for every earlier
