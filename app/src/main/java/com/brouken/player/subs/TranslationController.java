@@ -589,7 +589,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
             DebugLog.log(DebugLog.CAT_TRANSLATE, "chunk=" + index + " done"
                     + (p.getChunkErrors().containsKey(index) ? " (failed)" : "")
                     + " — completed=" + p.getCompletedChunks() + " failed=" + p.getFailedChunks()
-                    + " readyUntil=" + formatDuration(p.getReadyUntilMs()));
+                    + " " + describeCushion(p));
         }
 
         for (java.util.Map.Entry<Integer, String> e : p.getChunkErrors().entrySet()) {
@@ -612,6 +612,26 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
     @Nullable private TranslationProgress.SourceState debugSourceState;
     private int debugSourceStep = -1;
+
+    /**
+     * How much translated subtitle is still ahead of the playhead — the quantity that decides whether
+     * the user is about to run into untranslated lines, and the one this whole pipeline exists to keep
+     * positive.
+     *
+     * <p>Logged as its own figure rather than left to be reconstructed: {@code readyUntilMs} alone is
+     * an absolute timestamp, so working out the margin from it means cross-referencing every
+     * {@code [PLAYBACK]} line by hand, and the answer is only as good as the last position that
+     * happened to be logged. Measured directly, a single run tells you whether the margin ever gets
+     * thin and how fast it moves — which is what any threshold for reacting to it has to be set from.
+     */
+    private String describeCushion(TranslationProgress p) {
+        long until = watchableUntilMs();
+        long ahead = until - lastPositionMs;
+        return "readyUntil=" + formatDuration(p.getReadyUntilMs())
+                + " watchableUntil=" + formatDuration(until)
+                + " playhead=" + formatDuration(lastPositionMs)
+                + " cushion=" + (ahead > 0 ? formatDuration(ahead) : "0:00 (caught up)");
+    }
 
     /**
      * The extraction half of a streaming run — a track being read out of the container while chunks
@@ -639,12 +659,16 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         if (step == debugSourceStep) return;
         debugSourceStep = step;
         DebugLog.log(DebugLog.CAT_EXTRACT_SUBS, String.format(Locale.US,
-                "reading %d%% of the container · content up to %s · %s · next chunk %s",
+                "reading %d%% of the container · content up to %s · %s · next chunk %s · %s",
                 step * 10, formatDuration(p.getExtractedContentMs()),
                 p.getExtractionSpeedFactor() >= 0
                         ? String.format(Locale.US, "%.1fx real time", p.getExtractionSpeedFactor())
                         : "speed not measurable yet",
-                p.getEtaMs() >= 0 ? "in ~" + formatDuration(p.getEtaMs()) : "ETA unknown"));
+                p.getEtaMs() >= 0 ? "in ~" + formatDuration(p.getEtaMs()) : "ETA unknown",
+                // The margin, next to the rate that governs it: a speed above 1x grows the cushion and
+                // a speed below 1x drains it, and seeing both on one line is what makes a run
+                // diagnosable without cross-referencing anything.
+                describeCushion(p)));
     }
 
     /** Last bar rendering written, so a bar that is not changing writes nothing on the 100ms tick. */
