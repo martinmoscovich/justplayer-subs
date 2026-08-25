@@ -79,7 +79,9 @@ public class SyncView extends FrameLayout {
     private static final int AUTO_SYNC_INDEX = 1;
     private static final int RESET_INDEX = 2;
     private static final int PREV_SEG_INDEX = 3;
+    private static final int SEEK_BACK_INDEX = 4;
     private static final int PLAY_PAUSE_INDEX = 5;
+    private static final int SEEK_FWD_INDEX = 6;
     private static final int NEXT_SEG_INDEX = 7;
 
     private enum Zone { CONTROLS, LIST, REVIEW, AUTO_SYNC_MENU }
@@ -251,8 +253,11 @@ public class SyncView extends FrameLayout {
     public void setSession(ManualSyncSession session) {
         this.session = session;
         long seekS = session != null ? session.settings().getSeekMs() / 1000 : 5;
-        buttonViews[3].setText(seekS + "s");
-        buttonViews[5].setText(seekS + "s");
+        // By constant, never by literal: these two were written as 3 and 5 and silently became the
+        // prev-segment and play/pause buttons the moment Reset was inserted ahead of them, labelling
+        // two icon-only round buttons "5s" (setText also un-hides a label that was GONE).
+        buttonViews[SEEK_BACK_INDEX].setText(seekS + "s");
+        buttonViews[SEEK_FWD_INDEX].setText(seekS + "s");
         adapter.notifyDataSetChanged();
         updateReadout();
         updateButtons();
