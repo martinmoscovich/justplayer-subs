@@ -456,9 +456,24 @@ public class SubtitleSelectionController {
         return null;
     }
 
+    /**
+     * @param apiSubs what the launching app supplied: {@code null} when there was no launcher at all
+     *                (opened from the file browser), an <em>empty list</em> when a launcher was there
+     *                and supplied none. The difference decides whether {@link #sidecarCandidate} may
+     *                guess — see the branch below.
+     */
     private void buildExternalOptions(@Nullable List<MediaItem.SubtitleConfiguration> apiSubs,
                                       @Nullable Uri prefsSubtitleUri, @Nullable Uri mediaUri) {
         externalOptions.clear();
+        if (apiSubs != null && apiSubs.isEmpty() && prefsSubtitleUri == null) {
+            // A launcher that sent no subtitles has said something, and guessing over the top of it is
+            // wrong. It is also expensive: the guess appends ".srt" to the media URL, and a debrid
+            // proxy ignores the path and answers with the stream — so every playback started a
+            // speculative download of the video itself, which is how a 22 GB file crashed the app one
+            // second in (OutOfMemoryError, see readAll's ceiling). Harmless while Nuvio always sent a
+            // list; the moment it sent none, this fired on every playback.
+            return;
+        }
         if (apiSubs != null && !apiSubs.isEmpty()) {
             String[] labels = new String[apiSubs.size()];
             String[] formats = new String[apiSubs.size()];

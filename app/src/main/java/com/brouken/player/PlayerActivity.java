@@ -1512,7 +1512,12 @@ public class PlayerActivity extends Activity {
             if (customSubtitles != null) customSubtitles.release();
             customSubtitles = new CustomSubtitleController(this, playerView, player, trackSelector,
                     () -> apiHeaders);
-            customSubtitles.onMediaSet(mPrefs.mediaUri, apiAccess && apiSubs.size() > 0 ? apiSubs : null, mPrefs.subtitleUri);
+            // apiAccess distinguishes "a launcher started this and supplied no subtitles" (an empty
+            // list — a decision to respect) from "nobody started this through the API" (null — the
+            // local-file case, where guessing a <video>.srt sidecar is the intended testing hook).
+            // Collapsing both to null made the guess run on every launcher playback; over debrid that
+            // meant speculatively downloading the video itself. See SubtitleSelectionController.
+            customSubtitles.onMediaSet(mPrefs.mediaUri, apiAccess ? apiSubs : null, mPrefs.subtitleUri);
 
             // Intro/recap/ending skip buttons, when the launching app sent segments for this media.
             if (skipSegments != null) skipSegments.release();
