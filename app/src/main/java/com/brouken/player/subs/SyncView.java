@@ -333,6 +333,9 @@ public class SyncView extends FrameLayout {
             buttonViews[PLAY_PAUSE_INDEX].setIcon(
                     playing ? R.drawable.subtitle_ic_pause : R.drawable.subtitle_ic_play);
         }
+        // Only with a scale does the readout depend on where we are — without one it would reformat
+        // the same string every tick.
+        if (Math.abs(session.transform().getScale() - 1.0) > 1e-6) updateReadout();
         updateButtons();
     }
 
@@ -842,14 +845,43 @@ public class SyncView extends FrameLayout {
         return s == null ? "" : s.toUpperCase(Locale.US);
     }
 
+    /**
+     * How far the subtitle has been moved, stated where the user can act on it.
+     *
+     * <p>The old readout showed the transform's raw {@code offset}, which is the displacement at cue
+     * time <em>zero</em> — with two or more anchors that is an extrapolation back to the head of the
+     * file, not what is on screen. A real case: three anchors resolved to scale 1.0406, so the actual
+     * displacement grew 2.4s per minute of video and by minute 30 was 73s, while the readout still
+     * said 10.20. Worse, taking a second anchor <em>moves</em> that number (the first anchor forces
+     * scale 1, so its offset is a local measurement; the second lets the regression re-attribute part
+     * of it to drift) — which reads as the sync having changed when nothing on screen did.
+     *
+     * <p>So: {@code HERE} first, the total displacement at the current playback position, and
+     * {@code AT 0:00} beside it for the absolute figure the anchors resolved to. Both include the
+     * nudge — they are the same quantity at two points in the file. When there is no scale the two
+     * are equal by definition and it collapses to one {@code DELAY}. {@code SCALE} and {@code NUDGE}
+     * stay as the components that produced them, each shown only when it is doing something.
+     */
     private void updateReadout() {
         SyncState st = session != null ? session.state() : SyncState.empty();
         SyncTransform t = session != null ? session.transform() : SyncTransform.IDENTITY;
-        StringBuilder sb = new StringBuilder(String.format(Locale.US,
-                "OFFSET %+.2fS · NUDGE %+dMS", t.getOffsetMs() / 1000.0, st.getNudgeMs()));
-        if (Math.abs(t.getScale() - 1.0) > 1e-6) {
-            sb.append(String.format(Locale.US, " · SCALE %.4f", t.getScale()));
+        double scale = t.getScale();
+        long nudge = st.getNudgeMs();
+        boolean scaled = Math.abs(scale - 1.0) > 1e-6;
+
+        double atStartMs = t.getOffsetMs() + nudge;
+        StringBuilder sb = new StringBuilder();
+        if (scaled) {
+            // The cue currently on screen, found by inverting the transform — not adjust(pos)-pos,
+            // which would answer for a cue *written* at the current timestamp and is off by another
+            // factor of the drift (3s of the 73 in the case above).
+            double rawNowMs = (pos() - t.getOffsetMs() - nudge) / scale;
+            sb.append(String.format(Locale.US, "HERE %+.2fS · AT 0:00 %+.2fS · SCALE %.4f",
+                    (pos() - rawNowMs) / 1000.0, atStartMs / 1000.0, scale));
+        } else {
+            sb.append(String.format(Locale.US, "DELAY %+.2fS", atStartMs / 1000.0));
         }
+        if (nudge != 0) sb.append(String.format(Locale.US, " · NUDGE %+dMS", nudge));
         int anchors = st.getAnchors() != null ? st.getAnchors().size() : 0;
         sb.append(" · ").append(anchors).append(anchors == 1 ? " ANCHOR" : " ANCHORS");
         readout.setText(sb.toString());
