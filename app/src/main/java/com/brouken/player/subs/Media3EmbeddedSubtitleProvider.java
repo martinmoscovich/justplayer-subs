@@ -196,10 +196,10 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
             // Cues are handed over as they decode, not collected and returned at the end: a cancelled
             // read throws, and anything still held here would die with it instead of being kept as a
             // resumable prefix.
-            return new CueTrackOutput(batch -> {
+            return new CueTrackOutput(this::onFormat, batch -> {
                 delivered += batch.size();
                 sink.accept(batch);
-            });
+            }, this::onSample);
         }
 
         /**
@@ -220,6 +220,40 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
                         : "no text track at index " + wantedTextTrackIndex + " (container has "
                                 + textTracksSeen + ")");
             }
+            // What the container says the chosen track actually is. Matching it by index proves only
+            // that a track exists there — not that anything will come out of it. A read that produced
+            // zero cues over gigabytes had no way to say whether the track was the wrong one, an
+            // undecodable codec, or simply never reached by the interleave; this is the first half of
+            // that answer, and it costs one line at a point already reached once per read.
+            Log.i(TAG, "matched text track " + wantedTextTrackIndex + " of " + textTracksSeen
+                    + ": " + describe(wantedFormat));
+        }
+
+        @Nullable Format wantedFormat;
+        int samplesSeen;
+        private int loggedSampleStep = -1;
+
+        private void onFormat(Format f) { wantedFormat = f; }
+
+        /**
+         * Samples reaching the chosen track, whether or not any cue comes out of them. Separates the
+         * two ways a read can produce nothing: the track is never reached by the interleave (no
+         * samples at all) versus its samples do not decode into cues (samples but no cues). Reported
+         * in steps so a long read leaves a trail rather than a line per sample.
+         */
+        private void onSample() {
+            samplesSeen++;
+            int step = samplesSeen / 200;
+            if (step == loggedSampleStep) return;
+            loggedSampleStep = step;
+            Log.i(TAG, samplesSeen + " samples reached the chosen text track, " + delivered
+                    + " cues out so far");
+        }
+
+        private static String describe(@Nullable Format f) {
+            if (f == null) return "no format declared";
+            return f.sampleMimeType + " lang=" + f.language + " label=" + f.label
+                    + " codecs=" + f.codecs;
         }
 
         /** Captured so a resumed read can ask it where a given timestamp lives in the file. */
@@ -234,15 +268,19 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
     private static final class CueTrackOutput implements TrackOutput {
 
         private final CueSink out;
+        private final java.util.function.Consumer<Format> onFormat;
+        private final Runnable onSample;
         private final CueDecoder decoder = new CueDecoder();
         private byte[] buffer = new byte[1024];
         private int bufferedBytes;
 
-        CueTrackOutput(CueSink out) {
+        CueTrackOutput(java.util.function.Consumer<Format> onFormat, CueSink out, Runnable onSample) {
+            this.onFormat = onFormat;
             this.out = out;
+            this.onSample = onSample;
         }
 
-        @Override public void format(Format format) { }
+        @Override public void format(Format format) { onFormat.accept(format); }
 
         @Override
         public int sampleData(DataReader input, int length, boolean allowEndOfInput, int sampleDataPart)
@@ -266,6 +304,7 @@ public class Media3EmbeddedSubtitleProvider implements EmbeddedSubtitleProvider 
 
         @Override
         public void sampleMetadata(long timeUs, int flags, int size, int offset, @Nullable CryptoData cryptoData) {
+            onSample.run();
             // The sample is the `size` bytes ending `offset` bytes before what has been buffered so
             // far — that is the contract sampleData/sampleMetadata are written against.
             int end = bufferedBytes - offset;
