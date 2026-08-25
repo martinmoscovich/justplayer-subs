@@ -334,7 +334,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         debugBarModel = null;
 
         List<SubtitleEntry> exactEntries = null;
-        if (source == null && isExtractableSelected()) {
+        if (!hasUsableSource() && isExtractableSelected()) {
             pendingSourcePromotion = true;
             // A complete cache hit stays on the cheap in-memory path (also picks up today's existing
             // in-memory priority-pass split via session.start's positionMs below) — running an
@@ -452,6 +452,30 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     }
 
     /**
+     * Whether {@link #source} is something a run can actually translate.
+     *
+     * <p>An <em>empty</em> file is not: an extraction that yielded nothing still promotes a
+     * zero-entry {@link SubtitleFile} through {@link #onSubtitleUpdated}, and from then on
+     * {@code source != null} was enough to make this class treat the track as already read. Pressing
+     * Translate again then started a run over nothing — seen in a real log as
+     * {@code source=known(0 lines)}, which cannot produce anything and says so to nobody. Treating
+     * empty as absent sends the retry back through extraction, which is what the user was asking for.
+     */
+    /**
+     * A run that has finished having read nothing at all. Distinguished from an ordinary empty result
+     * by {@link #pendingSourcePromotion}: it is only ever true for a run that started from a
+     * not-yet-extracted track, and it is cleared the moment the first entry arrives — so still being
+     * set at the end means no entry ever did.
+     */
+    private boolean finishedWithNothingExtracted() {
+        return pendingSourcePromotion && !hasUsableSource();
+    }
+
+    private boolean hasUsableSource() {
+        return source != null && !source.getEntries().isEmpty();
+    }
+
+    /**
      * Whether the current selection could yield cues on demand (an embedded text track). Mirrors
      * {@code CustomSubtitleController.needsExtraction()}'s exact checks — kept here too so
      * {@link #reasonUnavailable} and {@link #start} share one definition instead of trusting a
@@ -468,7 +492,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     private String reasonUnavailable() {
         if (!hasApiKey()) return "No AI API key — set one in Settings > Translation";
         String target = targetLanguage();
-        if (source == null) {
+        if (!hasUsableSource()) {
             if (!isExtractableSelected()) return "Nothing to translate — pick a subtitle first";
             // Available on purpose: pressing Translate reads the track first, then translates it —
             // but only if the track's own declared language actually needs translating. Without this
@@ -507,6 +531,12 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
 
     @Override
     public void onSubtitleUpdated(SubtitleFile current) {
+        // An empty file is not "the first entries have streamed in" — it is the run reporting that it
+        // has nothing. Promoting it took Media3's own subtitle off the screen in exchange for an empty
+        // overlay, and left this class believing the track had been read: the next Translate then ran
+        // over `source=known(0 lines)`, which can produce nothing and said so to nobody. Ignoring it
+        // keeps the run in its not-yet-extracted state, which is the truth.
+        if (current == null || current.getEntries().isEmpty()) return;
         if (pendingSourcePromotion) {
             pendingSourcePromotion = false;
             source = current;
@@ -725,6 +755,13 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
             toastedForRun = true;
             String msg = p.getErrorMessage() != null ? p.getErrorMessage() : "unknown error";
             Toast.makeText(context, "Translation failed: " + msg, Toast.LENGTH_LONG).show();
+        } else if (p.getStatus() == RunStatus.DONE && finishedWithNothingExtracted()) {
+            // A read that yields no cues ends as a perfectly clean DONE — nothing failed, nothing was
+            // left untranslated, because nothing existed. Without this it reports as success and the
+            // screen says "Done" over an empty result. The non-streaming path has always said so
+            // (EmbeddedSubtitleController's "no readable subtitles"); the streaming path never did.
+            toastedForRun = true;
+            Toast.makeText(context, "No subtitles could be read from that track", Toast.LENGTH_LONG).show();
         } else if (p.getStatus() == RunStatus.DONE && p.getUntranslatedEntries() > 0) {
             toastedForRun = true;
             Toast.makeText(context, "Translated with warnings — " + p.getUntranslatedEntries()
@@ -827,6 +864,14 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
                 break;
             case FINISHED_OK:
             default:
+                if (finishedWithNothingExtracted()) {
+                    // Not an error and not a success: the track had nothing readable in it. Saying
+                    // "Done" here was the screen's own version of the silent failure this run was.
+                    return TranslateUiState.of(TranslateUiState.Mode.FINISHED, buttons)
+                            .result(TranslateUiState.Tone.WARN, "Nothing to translate",
+                                    "No subtitles could be read from that track")
+                            .build();
+                }
                 boolean freeRun = p == null || p.getStats() == null || p.getStats().getCostUsd() == null
                         || p.getStats().getCostUsd() <= 0;
                 b = TranslateUiState.of(TranslateUiState.Mode.FINISHED, buttons)
@@ -1009,7 +1054,7 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
     private String idleSubline() {
         // Only what is actually known: an embedded track that has not been read yet has no line count
         // to report, and inventing one would be worse than saying nothing.
-        if (source == null) return null;
+        if (!hasUsableSource()) return null;
         return String.format(Locale.US, "%,d lines", source.getEntries().size());
     }
 
