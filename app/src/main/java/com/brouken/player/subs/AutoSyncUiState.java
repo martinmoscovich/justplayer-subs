@@ -46,7 +46,19 @@ public final class AutoSyncUiState {
         }
     }
     public final double offsetSeconds;
+    /**
+     * Time-scale factor the run proposes, 1.0 when the subtitle only needs shifting. Anything else
+     * means the two releases run at different speeds (a PAL speed-up is 1.0427), so the correction is
+     * not a constant and {@link #offsetSeconds} alone is only true at the head of the file — the two
+     * travel together or neither means anything.
+     */
+    public final double scale;
     public final double uniqueness;
+
+    /** Whether the proposal stretches the subtitle rather than only shifting it. */
+    public boolean hasScale() {
+        return Math.abs(scale - 1.0) > 1e-9;
+    }
     /**
      * Whether the run ended in a way that owes the user a modal. True for a proposal <em>and</em> for
      * "nothing found" / "it failed": the user waited through the whole run either way, and an outcome
@@ -56,16 +68,16 @@ public final class AutoSyncUiState {
     public final boolean showResultModal;
 
     private AutoSyncUiState(boolean available, @Nullable String unavailableReason, boolean running,
-                             String hint, boolean hasConfidentResult, double offsetSeconds, double uniqueness,
-                             boolean showResultModal) {
+                             String hint, boolean hasConfidentResult, double offsetSeconds, double scale,
+                             double uniqueness, boolean showResultModal) {
         this(available, unavailableReason, running, hint, List.of(), hasConfidentResult, offsetSeconds,
-                uniqueness, showResultModal);
+                scale, uniqueness, showResultModal);
     }
 
     private AutoSyncUiState(boolean available, @Nullable String unavailableReason, boolean running,
                              String hint, List<ProbeRow> probes,
-                             boolean hasConfidentResult, double offsetSeconds, double uniqueness,
-                             boolean showResultModal) {
+                             boolean hasConfidentResult, double offsetSeconds, double scale,
+                             double uniqueness, boolean showResultModal) {
         this.available = available;
         this.unavailableReason = unavailableReason;
         this.running = running;
@@ -73,20 +85,21 @@ public final class AutoSyncUiState {
         this.probes = probes;
         this.hasConfidentResult = hasConfidentResult;
         this.offsetSeconds = offsetSeconds;
+        this.scale = scale;
         this.uniqueness = uniqueness;
         this.showResultModal = showResultModal;
     }
 
     static AutoSyncUiState unavailable(String reason) {
-        return new AutoSyncUiState(false, reason, false, reason, false, 0, 0, false);
+        return new AutoSyncUiState(false, reason, false, reason, false, 0, 1, 0, false);
     }
 
     static AutoSyncUiState idle() {
-        return new AutoSyncUiState(true, null, false, "", false, 0, 0, false);
+        return new AutoSyncUiState(true, null, false, "", false, 0, 1, 0, false);
     }
 
     static AutoSyncUiState running(String hint, List<ProbeRow> probes) {
-        return new AutoSyncUiState(true, null, true, hint, probes, false, 0, 0, false);
+        return new AutoSyncUiState(true, null, true, hint, probes, false, 0, 1, 0, false);
     }
 
     static ProbeRow probeRow(String label, String title, float fraction, boolean active) {
@@ -94,18 +107,18 @@ public final class AutoSyncUiState {
     }
 
     /** DONE with a confident result — {@link SyncView} shows Zone.REVIEW for this state. */
-    static AutoSyncUiState confidentResult(double offsetSeconds, double uniqueness, String hint) {
-        return new AutoSyncUiState(true, null, false, hint, true, offsetSeconds, uniqueness, true);
+    static AutoSyncUiState confidentResult(double offsetSeconds, double scale, double uniqueness, String hint) {
+        return new AutoSyncUiState(true, null, false, hint, true, offsetSeconds, scale, uniqueness, true);
     }
 
     /** A run that ended with nothing to propose (no match, or an error) — same shape as {@link #idle}
      *  with a hint, plus the modal that says so. See {@link #showResultModal}. */
     static AutoSyncUiState finishedEmpty(String hint) {
-        return new AutoSyncUiState(true, null, false, hint, false, 0, 0, true);
+        return new AutoSyncUiState(true, null, false, hint, false, 0, 1, 0, true);
     }
 
     /** Cancelled: a hint, no modal — the user did it and does not need telling. */
     static AutoSyncUiState terminal(String hint) {
-        return new AutoSyncUiState(true, null, false, hint, false, 0, 0, false);
+        return new AutoSyncUiState(true, null, false, hint, false, 0, 1, 0, false);
     }
 }

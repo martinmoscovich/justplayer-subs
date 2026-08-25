@@ -573,8 +573,16 @@ public class SyncView extends FrameLayout {
     private void showReviewModal() {
         if (autoSyncState == null) return;
         if (autoSyncState.hasConfidentResult) {
-            showModal("Auto-sync found a match",
-                    String.format(Locale.US, "Shift subtitles %+.2fs", autoSyncState.offsetSeconds),
+            // A stretch has no single number of seconds to offer: the correction grows through the
+            // file (a 1.0427 speed-up is 2.4s per minute), so "Shift subtitles +10.20s" would state
+            // a figure that is true only at the head of the file and visibly wrong by the end. Say
+            // what it does instead, and give the displacement at the position the user is watching,
+            // which is the part they can check against the screen.
+            String big = autoSyncState.hasScale()
+                    ? String.format(Locale.US, "Stretch subtitles %.4f×  ·  %+.2fs here",
+                            autoSyncState.scale, displacementHereSeconds(autoSyncState))
+                    : String.format(Locale.US, "Shift subtitles %+.2fs", autoSyncState.offsetSeconds);
+            showModal("Auto-sync found a match", big,
                     new SubsButton(getContext(), "Accept"),
                     new SubsButton(getContext(), "Reject"));
             return;
@@ -585,6 +593,17 @@ public class SyncView extends FrameLayout {
                         ? autoSyncState.hint : "No confident match",
                 "The subtitles were left as they are",
                 new SubsButton(getContext(), "OK"));
+    }
+
+    /**
+     * What the proposal would move the subtitle by at the current playback position — the same
+     * quantity the readout's {@code HERE} shows, computed against the proposed transform instead of
+     * the applied one. Inverts {@code videoTime = cue·scale + offset} to find the cue currently on
+     * screen, which is what the user is looking at when they judge the proposal.
+     */
+    private double displacementHereSeconds(AutoSyncUiState state) {
+        double posSeconds = pos() / 1000.0;
+        return posSeconds * (1 - 1 / state.scale) + state.offsetSeconds / state.scale;
     }
 
     private void showAutoSyncMenu() {
@@ -645,7 +664,7 @@ public class SyncView extends FrameLayout {
 
     private void acceptAutoSync() {
         if (session != null && autoSyncState != null && autoSyncState.hasConfidentResult) {
-            session.applyVadOffset(autoSyncState.offsetSeconds);
+            session.applyVadTransform(autoSyncState.scale, autoSyncState.offsetSeconds);
             syncChanged();
         }
         exitModal();

@@ -445,8 +445,8 @@ public class AutoSyncController implements AutoSyncSession.Listener {
             case DONE:
                 ResyncResult r = p.getResult();
                 DebugLog.log(DebugLog.CAT_AUTOSYNC, r != null
-                        ? String.format(Locale.US, "DONE offset=%+.2fs uniqueness=%.3f matched=%d",
-                                r.getOffsetSeconds(), r.getUniqueness(), r.getMatchedEvents())
+                        ? String.format(Locale.US, "DONE offset=%+.2fs scale=%.6f uniqueness=%.3f matched=%d",
+                                r.getOffsetSeconds(), r.getScale(), r.getUniqueness(), r.getMatchedEvents())
                         // Not an error: it ran and found nothing convincing. The engine's own
                         // "resync candidate: … REJECT (…)" line above says which gate turned it down.
                         : "DONE no confident match");
@@ -489,7 +489,8 @@ public class AutoSyncController implements AutoSyncSession.Listener {
             case DONE:
                 ResyncResult result = p.getResult();
                 return result != null
-                        ? AutoSyncUiState.confidentResult(result.getOffsetSeconds(), result.getUniqueness(), formatDone(result))
+                        ? AutoSyncUiState.confidentResult(result.getOffsetSeconds(), result.getScale(),
+                                result.getUniqueness(), formatDone(result))
                         : AutoSyncUiState.finishedEmpty("No confident match");
             case CANCELLED:
                 return AutoSyncUiState.terminal("Cancelled");
@@ -598,7 +599,13 @@ public class AutoSyncController implements AutoSyncSession.Listener {
         return (float) Math.max(0.0, Math.min(1.0, p.getFraction()));
     }
 
+    /** The hint under the Sync screen. A stretch cannot be stated as one number of seconds — the
+     *  correction differs at every point in the file — so it is named instead. */
     private static String formatDone(ResyncResult result) {
+        if (Math.abs(result.getScale() - 1.0) > 1e-9) {
+            return String.format(Locale.US, "Proposed stretch %.4f× (uniqueness %.1f)",
+                    result.getScale(), result.getUniqueness());
+        }
         return String.format(Locale.US, "Proposed shift %+.1fs (uniqueness %.1f)",
                 result.getOffsetSeconds(), result.getUniqueness());
     }
