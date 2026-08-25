@@ -77,9 +77,10 @@ public class SyncView extends FrameLayout {
     private static final int TIME_SELECTED = 0x8C283044;
 
     private static final int AUTO_SYNC_INDEX = 1;
-    private static final int PREV_SEG_INDEX = 2;
-    private static final int PLAY_PAUSE_INDEX = 4;
-    private static final int NEXT_SEG_INDEX = 6;
+    private static final int RESET_INDEX = 2;
+    private static final int PREV_SEG_INDEX = 3;
+    private static final int PLAY_PAUSE_INDEX = 5;
+    private static final int NEXT_SEG_INDEX = 7;
 
     private enum Zone { CONTROLS, LIST, REVIEW, AUTO_SYNC_MENU }
 
@@ -182,6 +183,7 @@ public class SyncView extends FrameLayout {
         buttons = new Btn[]{
                 new Btn("Sync line", this::enterListMode),
                 new Btn("Auto-sync", this::toggleAutoSync),
+                new Btn("Reset", this::resetSync),
                 new Btn("Prev seg", this::seekPrevSegment),
                 new Btn("5s", () -> seek(-1)),
                 new Btn("", this::togglePlay),
@@ -195,6 +197,9 @@ public class SyncView extends FrameLayout {
         buttonViews = new SubsButton[]{
                 new SubsButton(context, "Sync line", R.drawable.subtitle_ic_anchor),
                 new SubsButton(context, "Auto-sync", R.drawable.subtitle_ic_sparkles),
+                // Round and icon-only, like the segment jumps: the row already carried eight controls
+                // and a ninth labelled one pushed the transport group into the Done button at 1920px.
+                SubsButton.round(context, R.drawable.subtitle_ic_retry),
                 SubsButton.round(context, R.drawable.subtitle_ic_prev_seg),
                 new SubsButton(context, "5s", R.drawable.subtitle_ic_rewind),
                 SubsButton.round(context, R.drawable.subtitle_ic_pause),
@@ -529,6 +534,25 @@ public class SyncView extends FrameLayout {
         if (t != ManualSyncSession.NO_TARGET) listener.onSeekTo(t);
     }
 
+    /**
+     * Puts the subtitle back where the file says it goes: no anchors, no nudge, no accepted auto-sync
+     * offset. The only way out of a sync that went wrong was to nudge back by hand in 50ms steps and
+     * hope to land on zero, or to leave the screen and hope nothing was saved — neither of which is a
+     * way to say "start over".
+     *
+     * <p>Clears the whole {@link SyncState}, not just the nudge: from the user's side there is one
+     * displacement on screen, however it got there, and a Reset that left an anchor behind would not
+     * look like a reset. Disabled when there is nothing to undo, so it never reads as a live control
+     * that does nothing.
+     */
+    private void resetSync() {
+        if (session == null) return;
+        session.restoreState(SyncState.empty());
+        syncChanged();
+        updateReadout();
+        updateButtons();
+    }
+
     private void seekPrevSegment() {
         if (session == null || listener == null) return;
         long t = session.prevSegmentTarget(pos());
@@ -764,6 +788,7 @@ public class SyncView extends FrameLayout {
         enabled[AUTO_SYNC_INDEX] = autoSyncState == null || autoSyncState.available;
         enabled[PREV_SEG_INDEX] = session != null && session.prevSegmentTarget(p) != ManualSyncSession.NO_TARGET;
         enabled[NEXT_SEG_INDEX] = session != null && session.nextSegmentTarget(p) != ManualSyncSession.NO_TARGET;
+        enabled[RESET_INDEX] = session != null && !session.state().equals(SyncState.empty());
 
         boolean controls = zone == Zone.CONTROLS;
         if (controls && !enabled[buttonIndex]) {
