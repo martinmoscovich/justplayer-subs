@@ -22,6 +22,7 @@ import androidx.media3.common.Tracks;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
 
+import java.io.IOException;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -771,11 +772,34 @@ public class SubtitleSelectionController {
         }
     }
 
-    private static String readAll(InputStream in) throws Exception {
+    /**
+     * Hard ceiling on what will be pulled into memory for something claiming to be a subtitle. Real
+     * ones are tiny — the largest seen in this project is 125 KB, and a dense two-hour film runs about
+     * 60 KB — so 4 MB is roughly thirty times the worst realistic case and still nothing on a heap.
+     *
+     * <p>There was no limit at all until a launcher handed over a subtitle URL that served something
+     * else entirely: the read grew to a quarter of a gigabyte and died with an
+     * {@code OutOfMemoryError}, which — being an {@link Error}, not an {@link Exception} — went
+     * straight past the download thread's catch and killed the process a second into playback. A URL
+     * from outside the app is not a promise about what is behind it.
+     */
+    private static final int MAX_SUBTITLE_BYTES = 4 * 1024 * 1024;
+
+    // Package-visible for its regression test: the cap is a crash fix, and an off-by-one in it would
+    // bring back an OutOfMemoryError that kills the process rather than failing one subtitle.
+    static String readAll(InputStream in) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[8192];
         int n;
-        while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+        while ((n = in.read(buf)) != -1) {
+            if (out.size() + n > MAX_SUBTITLE_BYTES) {
+                // Named for what it is, so the row's error and the log say "this wasn't a subtitle"
+                // rather than something about memory.
+                throw new IOException("Not a subtitle: the file is larger than "
+                        + (MAX_SUBTITLE_BYTES / (1024 * 1024)) + " MB");
+            }
+            out.write(buf, 0, n);
+        }
         return out.toString(StandardCharsets.UTF_8.name());
     }
 }

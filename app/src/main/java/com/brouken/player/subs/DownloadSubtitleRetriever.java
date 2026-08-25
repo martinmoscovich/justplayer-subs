@@ -55,8 +55,14 @@ final class DownloadSubtitleRetriever implements SubtitleRetriever {
                     cache.putSubtitle(key, new CachedSubtitle(file, true, 0L, System.currentTimeMillis()));
                 }
                 mainHandler.post(() -> callback.onLoaded(file, false));
-            } catch (Exception e) {
-                mainHandler.post(() -> callback.onError(e));
+            } catch (Throwable t) {
+                // Throwable, not Exception: this thread has no other handler, so anything it lets
+                // through kills the whole process instead of failing one subtitle. That is not
+                // hypothetical — an OutOfMemoryError from a "subtitle" URL that served a quarter of a
+                // gigabyte took the player down a second into playback. Same reasoning as the
+                // engine's own worker-thread boundaries (AutoSyncSession, TranslationSession).
+                mainHandler.post(() -> callback.onError(
+                        t instanceof Exception ? (Exception) t : new Exception(t)));
             }
         }, "subtitle-download").start();
     }
