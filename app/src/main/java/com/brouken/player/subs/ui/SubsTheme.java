@@ -84,6 +84,9 @@ public final class SubsTheme {
     public static final int STATUS_PENDING = 0xFF3F465C;
     public static final int STATUS_EXTRACTING = 0xFF52626F;
     public static final int STATUS_CLOSED = 0xFFF4F7F9;
+    /** Read through with no dialogue in it: legible as "accounted for" without claiming to be
+     *  translated — muted next to STATUS_DONE's green, clearly ahead of STATUS_PENDING's slate. */
+    public static final int STATUS_NO_DIALOGUE = 0xFF3E6B57;
 
     // --- inks used on top of the white focus fill (chips invert rather than vanish) ---
     public static final int ON_LIGHT_MUTED = 0xFF4C5A60;

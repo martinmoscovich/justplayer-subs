@@ -1014,12 +1014,14 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
      */
     private void addLegend(TranslateUiState.Builder b) {
         boolean extracting = false, translating = false, failed = false, background = false;
+        boolean noDialogue = false;
         for (ChunkProgressBarView.Segment seg : lastModel.segments) {
             switch (seg.state) {
                 case EXTRACTING:
                 case CLOSING: extracting = true; break;
                 case TRANSLATING: translating = true; break;
                 case FAILED: failed = true; break;
+                case NO_DIALOGUE: noDialogue = true; break;
                 default: break;
             }
             if (seg.backgroundPass) background = true;
@@ -1027,6 +1029,9 @@ public class TranslationController implements SubtitlePipelineSession.Listener {
         if (extracting) b.legend(SubsTheme.STATUS_EXTRACTING, "EXTRACTING", false);
         if (translating) b.legend(SubsTheme.STATUS_TRANSLATING, "TRANSLATING", false);
         if (failed) b.legend(SubsTheme.STATUS_FAILED, "FAILED", false);
+        // Worth a key of its own: without one, a stretch drawn in neither green nor grey reads as an
+        // unexplained third thing. "Nothing to translate here" is the whole meaning.
+        if (noDialogue) b.legend(SubsTheme.STATUS_NO_DIALOGUE, "NO DIALOGUE", false);
         if (background) b.legend(SubsTheme.STATUS_PENDING, "BACKFILLING", true);
     }
 

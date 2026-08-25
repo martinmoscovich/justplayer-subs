@@ -377,6 +377,25 @@ final class ChunkTimelineTracker {
             // the priority one) hasn't even started yet. Bound to whichever zone `extracted` is
             // actually reporting progress for.
             boolean extractedIsInThisZone = backgroundPass ? extracted <= startAtMs : extracted >= startAtMs;
+
+            // Read through, and no cue came out of it. getExtractedContentMs() is the furthest point a
+            // cue has been decoded at; the byte-derived position is where the container read has
+            // reached regardless. Everything between them has been read and held no dialogue — which
+            // is not progress and not failure: a stretch nobody speaks in is already watchable,
+            // because there is nothing in it to translate.
+            //
+            // Saying so is also what makes an extraction that finds nothing anywhere legible. One that
+            // read 2.2 GB without producing a single cue showed as ordinary chunks closing, because a
+            // frontier moving on bytes is indistinguishable from one moving on content — the bar
+            // reported work that was never done. Marked, the same run reads as "no dialogue found
+            // here", which is either the truth about a silent stretch or an obvious wrong answer for
+            // an episode full of talking.
+            long cueFrontier = progress.getExtractedContentMs();
+            if (!backgroundPass && cueFrontier < extracted && start >= cueFrontier && end <= extracted) {
+                return new ChunkProgressBarView.Segment(start, end,
+                        ChunkProgressBarView.SegmentState.NO_DIALOGUE, endEstimated, backgroundPass, 0f, null);
+            }
+
             if (extractedIsInThisZone && start <= extracted) {
                 if (extracted >= end) {
                     // Extraction has read past this segment's *estimated* end (a guess based on target
@@ -459,6 +478,7 @@ final class ChunkTimelineTracker {
             case TRANSLATING: return SubsTheme.STATUS_TRANSLATING;
             case FAILED: return SubsTheme.STATUS_FAILED;
             case CLOSED: return SubsTheme.STATUS_CLOSED;
+            case NO_DIALOGUE: return SubsTheme.STATUS_NO_DIALOGUE;
             case CLOSING:
             case EXTRACTING: return SubsTheme.STATUS_EXTRACTING;
             case PENDING:

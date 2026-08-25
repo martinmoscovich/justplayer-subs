@@ -34,7 +34,16 @@ import com.brouken.player.subs.ui.SubsTheme;
  */
 public class ChunkProgressBarView extends View {
 
-    public enum SegmentState { PENDING, EXTRACTING, CLOSING, CLOSED, TRANSLATING, DONE, FAILED }
+    public enum SegmentState {
+        PENDING, EXTRACTING, CLOSING, CLOSED, TRANSLATING, DONE, FAILED,
+        /**
+         * Read through, and there was no dialogue in it. Not a kind of progress and not a kind of
+         * failure — a stretch nobody speaks in is already watchable, because there is nothing in it to
+         * translate. Distinct from {@link #DONE} (translated) so the bar never claims work it did not
+         * do, and from {@link #PENDING} so a silent opening does not read as untouched.
+         */
+        NO_DIALOGUE
+    }
 
     public static final class Segment {
         final long startMs;
@@ -231,6 +240,7 @@ public class ChunkProgressBarView extends View {
                 case CLOSED: color = COLOR_CLOSED; break;
                 case CLOSING: color = blend(COLOR_EXTRACTING, COLOR_CLOSED, pulse); anyPulsing = true; break;
                 case FAILED: color = COLOR_FAILED; break;
+                case NO_DIALOGUE: color = SubsTheme.STATUS_NO_DIALOGUE; break;
                 case EXTRACTING:
                 case PENDING:
                 default: color = COLOR_PENDING; break;
