@@ -368,17 +368,8 @@ final class ChunkTimelineTracker {
             // is the same "roughly uniform bitrate" assumption the chunk-duration estimates already
             // make. Only ever raises the estimate — a stale cue-based number from before the container
             // caught up must never make progress look like it went backwards.
-            // The byte estimate is only meaningful once at least one cue has actually come out. Bytes
-            // say where the *container* read has got to; turning that into a content position assumes
-            // the read is producing cues along the way. When it produces none, the assumption is
-            // simply false, and the bar reported segments as CLOSING and one as 27% extracted for
-            // content that was never extracted at all — observed over four minutes and 2.2 GB with
-            // zero cues delivered. A bar that invents progress is worse than one that admits it has
-            // nothing: the first hides the failure, the second shows it.
-            long extracted = progress.getExtractedContentMs() > 0
-                    ? Math.max(progress.getExtractedContentMs(),
-                            (long) (session.currentExtractionFraction() * totalDurationMs))
-                    : 0L;
+            long extracted = Math.max(progress.getExtractedContentMs(),
+                    (long) (session.currentExtractionFraction() * totalDurationMs));
             // A single scalar can't unambiguously locate the frontier across two disjoint zones — once
             // a position-priority run's priority pass has read anything, `extracted` sits somewhere at
             // or past startAtMs, which numerically satisfies "start <= extracted" for every earlier
