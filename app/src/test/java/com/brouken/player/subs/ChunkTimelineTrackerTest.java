@@ -21,6 +21,7 @@ import subtitleengine.translation.TranslationProgress;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -134,6 +135,57 @@ class ChunkTimelineTrackerTest {
         return new SubtitlePipelineSession(translator, config, 1, sameThread, noopListener) {
             @Override public boolean isRangeReady(long startMs, long endMs) { return true; }
         };
+    }
+
+    /** A session that reports itself RUNNING with the container read not yet anywhere — the state a
+     *  position-priority run sits in while it seeks and resyncs, before a single cue comes out. */
+    private static SubtitlePipelineSession runningSessionWithNoExtractionYet(ChunkingConfig config) {
+        TranslationClient client = new TranslationClient() {
+            @Override public String getName() { return "fake"; }
+            @Override public String getModelId() { return "fake"; }
+            @Override public CompletionResult complete(String systemPrompt, String userPrompt) {
+                throw new AssertionError("should never be called — session is never started");
+            }
+        };
+        SubtitleTranslator translator = new SubtitleTranslator(client, new SubtitleChunker(), 1, 0);
+        SubtitlePipelineSession.Listener noopListener = new SubtitlePipelineSession.Listener() {
+            @Override public void onSubtitleUpdated(SubtitleFile current) { }
+            @Override public void onProgress(TranslationProgress progress) { }
+        };
+        return new SubtitlePipelineSession(translator, config, 1, Runnable::run, noopListener) {
+            @Override public double currentExtractionFraction() { return 0.0; }
+            @Override public RunStatus status() { return RunStatus.RUNNING; }
+        };
+    }
+
+    /**
+     * A position-priority run spends its first stretch opening, seeking and resyncing the container,
+     * and none of that moves any number: {@code extractedContentMs} is 0 and the byte fraction has not
+     * reached the run's zone. Measured at 75 seconds on a 10 GB file, during which every segment fell
+     * through to PENDING and the screen was indistinguishable from a run that had died — the user
+     * reported it as frozen. The segment the run starts in has to say it is working.
+     */
+    @Test
+    void aRunThatHasNotExtractedAnythingYetStillShowsItIsWorking() {
+        ChunkingConfig config = oneEntryPerChunkConfig();
+        ChunkTimelineTracker tracker = new ChunkTimelineTracker(config);
+        SubtitlePipelineSession session = runningSessionWithNoExtractionYet(config);
+
+        long startAtMs = 113_718L; // the playhead a position-priority run began from
+        tracker.reset(4_624_512L, startAtMs, null);
+
+        ChunkProgressBarView.Model model = tracker.buildModel(
+                streamingBeforeAnyChunkStarted(0L), session, startAtMs);
+
+        ChunkProgressBarView.Segment atStart = null;
+        for (ChunkProgressBarView.Segment seg : model.segments) {
+            if (seg.startMs <= startAtMs && startAtMs < seg.endMs && !seg.backgroundPass) atStart = seg;
+        }
+        assertNotNull(atStart, "there must be a segment covering where the run starts");
+        assertEquals(ChunkProgressBarView.SegmentState.EXTRACTING, atStart.state,
+                "a run with nothing extracted yet must not read as untouched");
+        assertEquals(0f, atStart.extractingFill, 1e-6,
+                "and must not claim progress it does not have");
     }
 
     private static SubtitleEntry entry(int index, long startMs, long endMs) {

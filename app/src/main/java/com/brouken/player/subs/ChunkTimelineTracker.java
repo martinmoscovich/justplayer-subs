@@ -398,6 +398,17 @@ final class ChunkTimelineTracker {
                 return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.EXTRACTING,
                         endEstimated, backgroundPass, fill, label);
             }
+            // The frontier hasn't appeared in this zone yet, but the run is under way: the container is
+            // being opened, seeked and resynced, and none of that moves a number. Measured at 75
+            // seconds on a 10 GB file (a position-priority run seeks to ~623 MB in), during which every
+            // segment fell through to PENDING and the screen was indistinguishable from a run that had
+            // died. The segment the run actually starts in says it is working instead — with no fill,
+            // because there genuinely is no progress to claim yet.
+            if (!extractedIsInThisZone && !backgroundPass && session.status() == RunStatus.RUNNING
+                    && start <= startAtMs && startAtMs < end) {
+                return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.EXTRACTING,
+                        endEstimated, backgroundPass, 0f, "reading the video…");
+            }
         }
         return new ChunkProgressBarView.Segment(start, end, ChunkProgressBarView.SegmentState.PENDING,
                 endEstimated, backgroundPass, 0f, null);
