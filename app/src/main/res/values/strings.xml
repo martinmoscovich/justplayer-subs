@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">Just Player</string>
+    <string name="app_name" translatable="false">SubPlayer</string>
     <string name="video_resize_fit">Fit</string>
     <string name="video_resize_crop">Crop</string>
     <string name="video_orientation_video">Video orientation</string>
@@ -64,4 +64,9 @@
     <string name="skip_ending">Skip ending</string>
     <string name="skip_generic">Skip</string>
     <string name="subtitle_provider_search_failed">Subtitle search failed. Check the connection and the OpenSubtitles API key.</string>
+    <string name="update_available_title">Update available</string>
+    <string name="update_available_message">Version %s is available. Do you want to download it?</string>
+    <string name="update_download">Update</string>
+    <string name="update_later">Later</string>
+    <string name="update_download_unavailable">Unable to open the update download.</string>
 </resources>

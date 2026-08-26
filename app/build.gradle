@@ -2,6 +2,31 @@ plugins {
     id 'com.android.application'
 }
 
+// OTA distribution settings. They can be overridden for a fork/CI build with -PotaReleaseBaseUrl
+// and -PotaApkFileName without requiring a Java source change.
+def otaReleaseBaseUrl = providers.gradleProperty("otaReleaseBaseUrl")
+        .getOrElse("https://github.com/martinmoscovich/justplayer-subs/releases/latest/download")
+        .replaceAll('/+$', '')
+def otaApkFileName = providers.gradleProperty("otaApkFileName").getOrElse("SubPlayer.apk")
+def otaVersionFileName = providers.gradleProperty("otaVersionFileName").getOrElse("version.json")
+// Keep the configured version as the major part and reserve six decimal digits for the DEBUG
+// timestamp. This guarantees every build of version N is below every build of version N+1.
+final long debugVersionMultiplier = 1_000_000L
+def otaSemanticVersionCode = null
+def debugBuildVersionCode = null
+def effectiveDebugVersionCode = {
+    if (debugBuildVersionCode == null) {
+        long baseVersionCode = otaSemanticVersionCode
+        long timestampPart = (System.currentTimeMillis() / 1000L) % debugVersionMultiplier
+        long effectiveCode = baseVersionCode * debugVersionMultiplier + timestampPart
+        if (effectiveCode > Integer.MAX_VALUE) {
+            throw new GradleException("versionCode demasiado alto para el esquema DEBUG OTA")
+        }
+        debugBuildVersionCode = effectiveCode as int
+    }
+    debugBuildVersionCode
+}
+
 android {
     namespace 'com.brouken.player'
     compileSdk = 36
@@ -13,7 +38,12 @@ android {
         minSdkVersion 23
         targetSdkVersion 36
         versionCode 215
+        otaSemanticVersionCode = versionCode
         versionName "0.${versionCode}"
+        buildConfigField "String", "OTA_RELEASE_BASE_URL", "\"${otaReleaseBaseUrl}\""
+        buildConfigField "String", "OTA_APK_FILE_NAME", "\"${otaApkFileName}\""
+        buildConfigField "String", "OTA_VERSION_FILE_NAME", "\"${otaVersionFileName}\""
+        buildConfigField "long", "OTA_DEBUG_VERSION_MULTIPLIER", "${debugVersionMultiplier}L"
         if (abiFilter) {
             def abiCodeMap = ["x86": 1, "x86_64": 2, "armeabi-v7a": 3, "arm64-v8a": 4]
             versionCode = versionCode * 10 + abiCodeMap[abiFilter]
@@ -60,9 +90,16 @@ android {
         }
     }
     applicationVariants.all { variant ->
-        if (variant.buildType.name == "release" && variant.flavorName == "latestUniversal") {
+        if (variant.buildType.name == "debug") {
             variant.outputs.all { output ->
-                output.outputFileName = "${base.archivesName.get()}.apk"
+                output.versionCodeOverride = effectiveDebugVersionCode()
+            }
+        }
+        // The OTA endpoint always points at this asset name. Keeping it independent from the
+        // version also makes GitHub's /releases/latest/download URL usable.
+        if (variant.flavorName == "latestUniversal") {
+            variant.outputs.all { output ->
+                output.outputFileName = otaApkFileName
             }
         }
         if (variant.buildType.name == "release" && variant.flavorName == "legacyUniversal") {
@@ -140,4 +177,41 @@ dependencies {
 
 tasks.withType(Test).configureEach {
     useJUnitPlatform()
+}
+
+// A configuration-cache entry would retain the timestamp calculated above. DEBUG tasks therefore
+// opt out so every invocation configures a new versionCode; RELEASE tasks remain cache-compatible.
+tasks.configureEach {
+    if (name.toLowerCase().contains("debug")) {
+        notCompatibleWithConfigurationCache("DEBUG builds use the current timestamp as versionCode.")
+    }
+}
+
+// Produces the two assets to attach to a GitHub Release. Debug is the current default; when the
+// project moves to release signing, use -PotaBuildType=release with the same task and protocol.
+def otaBuildType = providers.gradleProperty("otaBuildType").getOrElse("debug")
+def otaBuildTypeCapitalized = otaBuildType.capitalize()
+def otaApk = layout.buildDirectory.file("outputs/apk/latestUniversal/${otaBuildType}/${otaApkFileName}")
+def otaAssetsDir = layout.buildDirectory.dir("ota-release-assets")
+def otaVersionJson = otaAssetsDir.map { it.file(otaVersionFileName) }
+def otaVersionName = android.defaultConfig.versionName.toString()
+def otaVersionCode = otaBuildType == "debug" ? effectiveDebugVersionCode() : android.defaultConfig.versionCode
+
+def generateOtaVersionJson = tasks.register("generateOtaVersionJson") {
+    inputs.property("versionName", otaVersionName)
+    inputs.property("versionCode", otaVersionCode)
+    outputs.file(otaVersionJson)
+
+    doLast {
+        def versionFile = otaVersionJson.get().asFile
+        versionFile.parentFile.mkdirs()
+        versionFile.text = "{\n  \"versionName\": \"${otaVersionName}\",\n  \"versionCode\": ${otaVersionCode}\n}\n"
+    }
+}
+
+tasks.register("prepareOtaReleaseAssets", Copy) {
+    dependsOn "assembleLatestUniversal${otaBuildTypeCapitalized}"
+    from(otaApk)
+    into(otaAssetsDir)
+    finalizedBy(generateOtaVersionJson)
 }

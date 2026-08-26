@@ -102,6 +102,7 @@ import com.brouken.player.skip.SkipSegmentParser;
 import com.brouken.player.subs.CustomSubtitleController;
 import com.brouken.player.subs.SubtitleSelectionController;
 import com.brouken.player.subs.SubtitleSettingsActivity;
+import com.brouken.player.updater.AppUpdateChecker;
 import subtitleengine.selection.ExternalSubtitleExtras;
 import androidx.media3.ui.TimeBar;
 
@@ -269,6 +270,8 @@ public class PlayerActivity extends Activity {
         }
 
         isTvBox = Utils.isTvBox(this);
+
+        AppUpdateChecker.check(this);
 
         if (isTvBox) {
             AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES);
